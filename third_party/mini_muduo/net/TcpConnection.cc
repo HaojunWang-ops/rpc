@@ -303,7 +303,7 @@ namespace reactor
         void TcpConnection::handleClose()
         {
             loop_->assertInLoopThread();
-            assert(state_ == kConnected || state_ == kConnecting);
+            assert(state_ == kConnected || state_ == kDisconnecting);
             setState(kDisconnected);
             channel_->disableAll();
             LOG_INFO << "Ready to remove channel. FD = " << channel_->fd()

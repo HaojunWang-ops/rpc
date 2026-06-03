@@ -39,3 +39,17 @@ target_link_libraries(consumer
         myrpc
         example_proto
 )
+
+add_executable(bad_packet_test
+    bad_packet_test.cc
+)
+
+add_executable(service_not_found
+    service_not_found.cc
+)
+
+target_link_libraries(service_not_found
+    PRIVATE
+        myrpc
+        example_proto
+)

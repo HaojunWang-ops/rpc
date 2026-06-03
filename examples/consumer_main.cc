@@ -6,67 +6,114 @@
 #include <google/protobuf/stubs/common.h>
 #include <iostream>
 
+void PrintController(const char* case_name, SimpleRpcController& controller)
+{
+    if (controller.Failed())
+    {
+        std::cout << "[" << case_name << "] RPC failed: "
+                  << controller.ErrorText() << "\n";
+    }
+    else
+    {
+        std::cout << "[" << case_name << "] RPC ok\n";
+    }
+}
+
+void TestLoginSuccess(demo::UserService_Stub& stub)
+{
+    SimpleRpcController controller;
+    demo::LoginRequest request;
+    demo::LoginResponse response;
+
+    request.set_name("haojun");
+    request.set_password("123456");
+
+    stub.Login(&controller, &request, &response, nullptr);
+
+    PrintController("LoginSuccess", controller);
+    std::cout << "code=" << response.code()
+              << ", message=" << response.message()
+              << ", success=" << response.success() << "\n\n";
+}
+
+void TestLoginWrongPassword(demo::UserService_Stub& stub)
+{
+    SimpleRpcController controller;
+    demo::LoginRequest request;
+    demo::LoginResponse response;
+
+    request.set_name("haojun");
+    request.set_password("wrong");
+
+    stub.Login(&controller, &request, &response, nullptr);
+
+    PrintController("LoginWrongPassword", controller);
+    std::cout << "code=" << response.code()
+              << ", message=" << response.message()
+              << ", success=" << response.success() << "\n\n";
+}
+
+void TestLoginEmptyName(demo::UserService_Stub& stub)
+{
+    SimpleRpcController controller;
+    demo::LoginRequest request;
+    demo::LoginResponse response;
+
+    request.set_name("");
+    request.set_password("123456");
+
+    stub.Login(&controller, &request, &response, nullptr);
+
+    PrintController("LoginEmptyName", controller);
+    std::cout << "code=" << response.code()
+              << ", message=" << response.message()
+              << ", success=" << response.success() << "\n\n";
+}
+
+void TestRegisterSuccess(demo::UserService_Stub& stub)
+{
+    SimpleRpcController controller;
+    demo::RegisterRequest request;
+    demo::RegisterResponse response;
+
+    request.set_name("haojun");
+    request.set_password("123456");
+
+    stub.Register(&controller, &request, &response, nullptr);
+
+    PrintController("RegisterSuccess", controller);
+    std::cout << "code=" << response.code()
+              << ", message=" << response.message()
+              << ", success=" << response.success() << "\n\n";
+}
+
+void TestRegisterEmptyName(demo::UserService_Stub& stub)
+{
+    SimpleRpcController controller;
+    demo::RegisterRequest request;
+    demo::RegisterResponse response;
+
+    request.set_name("");
+    request.set_password("123456");
+
+    stub.Register(&controller, &request, &response, nullptr);
+
+    PrintController("RegisterEmptyName", controller);
+    std::cout << "code=" << response.code()
+              << ", message=" << response.message()
+              << ", success=" << response.success() << "\n\n";
+}
+
 int main()
 {
-    GOOGLE_PROTOBUF_VERIFY_VERSION;
-
     RpcChannel channel("127.0.0.1", 8000);
-
     demo::UserService_Stub stub(&channel);
 
-    {
-        demo::LoginRequest request;
-        request.set_name("haojun");
-        request.set_password("123456");
+    TestLoginSuccess(stub);
+    TestLoginWrongPassword(stub);
+    TestLoginEmptyName(stub);
+    TestRegisterSuccess(stub);
+    TestRegisterEmptyName(stub);
 
-        demo::LoginResponse response;
-        SimpleRpcController controller;
-
-        stub.Login(&controller, &request, &response, nullptr);
-
-        if (controller.Failed())
-        {
-            std::cerr << "rpc failed: "
-                      << controller.ErrorText()
-                      << "\n";
-            return 1;
-        }
-        else
-        {
-            std::cout << "Login response:\n";
-            std::cout << "  code = " << response.code() << "\n";
-            std::cout << "  message = " << response.message() << "\n";
-            std::cout << "  success = " << std::boolalpha
-                      << response.success() << "\n";
-        }
-    }
-
-    {
-        demo::RegisterRequest request;
-        request.set_name("haojun");
-        request.set_password("abcdef");
-
-        demo::RegisterResponse response;
-        SimpleRpcController controller;
-
-        stub.Register(&controller, &request, &response, nullptr);
-
-        if (controller.Failed())
-        {
-            std::cerr << "Register rpc failed: "
-                      << controller.ErrorText()
-                      << "\n";
-        }
-        else
-        {
-            std::cout << "Register response:\n";
-            std::cout << "  code = " << response.code() << "\n";
-            std::cout << "  message = " << response.message() << "\n";
-            std::cout << "  success = " << std::boolalpha
-                      << response.success() << "\n";
-        }
-    }
-
-    google::protobuf::ShutdownProtobufLibrary();
     return 0;
 }
