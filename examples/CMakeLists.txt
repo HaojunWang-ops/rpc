@@ -1,55 +1,24 @@
-set(EXAMPLE_PROTO_FILES
-    ${CMAKE_CURRENT_SOURCE_DIR}/user.proto
-)
-
-protobuf_generate_cpp(EXAMPLE_PROTO_SRCS EXAMPLE_PROTO_HDRS ${EXAMPLE_PROTO_FILES})
-
-add_library(example_proto STATIC
-    ${EXAMPLE_PROTO_SRCS}
-    ${EXAMPLE_PROTO_HDRS}
-)
-
-target_include_directories(example_proto
-    PUBLIC
-        ${CMAKE_CURRENT_BINARY_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}
-)
-
-target_link_libraries(example_proto
-    PUBLIC
-        protobuf::libprotobuf
-)
+# examples/CMakeLists.txt
 
 add_executable(provider
     provider_main.cc
 )
 
-target_link_libraries(provider
-    PRIVATE
-        myrpc
-        example_proto
+target_link_libraries(provider PRIVATE
+    myrpc_core
+    user_service
 )
+
+myrpc_apply_sanitizers(provider)
+
 
 add_executable(consumer
     consumer_main.cc
 )
 
-target_link_libraries(consumer
-    PRIVATE
-        myrpc
-        example_proto
+target_link_libraries(consumer PRIVATE
+    myrpc_core
+    user_proto
 )
 
-add_executable(bad_packet_test
-    bad_packet_test.cc
-)
-
-add_executable(service_not_found
-    service_not_found.cc
-)
-
-target_link_libraries(service_not_found
-    PRIVATE
-        myrpc
-        example_proto
-)
+myrpc_apply_sanitizers(consumer)

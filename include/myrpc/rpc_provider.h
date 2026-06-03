@@ -2,6 +2,7 @@
 
 #include "rpc_controller.h"
 #include "rpc_closure.h"
+#include "ThreadPool.h"
 
 #include "net/TcpConnection.h"
 #include "net/TcpServer.h"
@@ -17,6 +18,8 @@
 class RpcProvider
 {
 public:
+    RpcProvider(size_t threadNum);
+
     void NotifyService(google::protobuf::Service* service);
     void Run(const std::string& ip, uint16_t port);
 
@@ -28,11 +31,19 @@ private:
                    reactor::Timestamp receive_time);
 
     bool SendRpcResponse(const reactor::net::TcpConnectionPtr& conn,
-                         google::protobuf::Message* response,
-                         SimpleRpcController* controller);                        
+                         std::shared_ptr<google::protobuf::Message> response,
+                         std::shared_ptr<SimpleRpcController> controller);                        
     
     void SendRpcError(const reactor::net::TcpConnectionPtr& conn,
-                      SimpleRpcController* controller);
+                      std::shared_ptr<SimpleRpcController> controller);
+    
+    void doRpcTask(const reactor::net::TcpConnectionPtr& conn,
+                   std::string request_frame);
+    
+    void serThreadNum(int num){
+        threadNum_ = num;
+    }
+
 private:
     struct ServiceInfo {
         google::protobuf::Service* service;
@@ -40,4 +51,7 @@ private:
     };
 
     std::unordered_map<std::string, ServiceInfo> service_map_;
+
+    size_t threadNum_;
+    ThreadPool business_thread_pool_;
 };

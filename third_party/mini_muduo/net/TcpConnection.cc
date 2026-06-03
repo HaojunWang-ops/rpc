@@ -10,20 +10,20 @@
 
 #include <memory>
 
-void reactor::net::defaultConnectionCallback(const TcpConnectionPtr& conn)
+void reactor::net::defaultConnectionCallback(const TcpConnectionPtr &conn)
 {
-  LOG_TRACE << conn->localAddress().toIpPort() << " -> "
-            << conn->peerAddress().toIpPort() << " is "
-            << (conn->connected() ? "UP" : "DOWN");
+    LOG_TRACE << conn->localAddress().toIpPort() << " -> "
+              << conn->peerAddress().toIpPort() << " is "
+              << (conn->connected() ? "UP" : "DOWN");
 }
 
-void reactor::net::defaultMessageCallback(const TcpConnectionPtr& conn,
-                                            Buffer* buf,
-                                            Timestamp receiveTime)
+void reactor::net::defaultMessageCallback(const TcpConnectionPtr &conn,
+                                          Buffer *buf,
+                                          Timestamp receiveTime)
 {
-  buf->retrieveAll();
-  (void) conn;
-  (void) receiveTime;
+    buf->retrieveAll();
+    (void)conn;
+    (void)receiveTime;
 }
 
 namespace reactor
@@ -42,7 +42,7 @@ namespace reactor
               highWaterMark_(64 * 1024 * 1024)
         {
             LOG_TRACE << "TcpConnection::ctor[" << name_ << "] at " << this
-                     << " fd=" << connfd;
+                      << " fd=" << connfd;
 
             channel_->setReadCallback([this](Timestamp receiveTime)
                                       { this->handleRead(receiveTime); });
@@ -55,15 +55,15 @@ namespace reactor
                                        { this->handleClose(); });
             socket_->setKeepAlive(true);
             LOG_INFO << "new connection " << name_
-                << " fd=" << connfd
-                << " ioLoop=" << loop_
-                << " threadId=" << CurrentThread::tid();
+                     << " fd=" << connfd
+                     << " ioLoop=" << loop_
+                     << " threadId=" << CurrentThread::tid();
         }
 
         TcpConnection::~TcpConnection()
         {
             LOG_TRACE << "TcpConnection::dtor[" << name_ << "] at " << this
-                     << " fd=" << channel_->fd();
+                      << " fd=" << channel_->fd();
             assert(state_ == kDisconnected);
         }
 
@@ -89,6 +89,30 @@ namespace reactor
             send(StringPiece(static_cast<const char *>(data), len));
         }
 
+        void TcpConnection::send(const std::string &message)
+        {
+            send(StringPiece(message));
+        }
+
+        void TcpConnection::send(std::string &&message)
+        {
+            if (state_ != kConnected)
+            {
+                return;
+            }
+
+            if (loop_->isInLoopThread())
+            {
+                sendInLoop(message.data(), message.size());
+            }
+            else
+            {
+                TcpConnectionPtr self = shared_from_this();
+
+                loop_->runInLoop([self, msg = std::move(message)]() mutable
+                                 { self->sendInLoop(msg.data(), msg.size()); });
+            }
+        }
         void TcpConnection::send(const StringPiece &message)
         {
             if (state_ == kConnected)
@@ -117,7 +141,7 @@ namespace reactor
                 else
                 {
                     loop_->runInLoop([this, str = buf->retrieveAsString()]()
-                                       { this->sendInLoop(str); });
+                                     { this->sendInLoop(str); });
                 }
             }
         }
@@ -138,7 +162,7 @@ namespace reactor
                 return;
             }
 
-            //如果没有关注写事件，并且写缓冲区是空的
+            // 如果没有关注写事件，并且写缓冲区是空的
             if (!channel_->isWriting() && outputBuffer_.readableBytes() == 0)
             {
                 nwrote = sockets::write(channel_->fd(), data, len);
@@ -153,7 +177,7 @@ namespace reactor
                 }
                 else
                 {
-                    nwrote = 0;   //nwrote = 0,为了后面remaing += wrote的时候，不会加负数
+                    nwrote = 0; // nwrote = 0,为了后面remaing += wrote的时候，不会加负数
                     if (errno != EWOULDBLOCK)
                     {
                         LOG_SYSERR << " sendInLoop() errno";
@@ -182,7 +206,7 @@ namespace reactor
             }
         }
 
-        //半关闭状态，关闭写端
+        // 半关闭状态，关闭写端
         void TcpConnection::shutdown()
         {
             if (state_ == kConnected)
@@ -206,9 +230,9 @@ namespace reactor
             socket_->setTcpNoDelay(on);
         }
 
-        //与构造函数分开
-        //原因：1.获取shared_from_this(),必须等到构造函数完成
-        //2.channel_->enableReading()要在子线程运行
+        // 与构造函数分开
+        // 原因：1.获取shared_from_this(),必须等到构造函数完成
+        // 2.channel_->enableReading()要在子线程运行
         void TcpConnection::connectEstablished()
         {
             loop_->assertInLoopThread();
@@ -218,8 +242,8 @@ namespace reactor
             connectionCallback_(shared_from_this());
         }
 
-        //conncectDestroyed负责channel的处理
-        //先disableAll(),然后removeChannel()
+        // conncectDestroyed负责channel的处理
+        // 先disableAll(),然后removeChannel()
         void TcpConnection::connectDestroyed()
         {
             loop_->assertInLoopThread();
@@ -230,8 +254,8 @@ namespace reactor
                 connectionCallback_(shared_from_this());
             }
             LOG_TRACE << "Ready to remove channel. FD = " << channel_->fd()
-                     << ", state_ = " << state_
-                     << ", events_ = " << channel_->events();
+                      << ", state_ = " << state_
+                      << ", events_ = " << channel_->events();
             loop_->removeChannel(channel_.get());
         }
 
@@ -271,9 +295,8 @@ namespace reactor
                         channel_->disableWriting();
                         if (writeCompleteCallback_)
                         {
-                            loop_->queueInLoop([conn = shared_from_this()](){
-                                conn->writeCompleteCallback_(conn);
-                            });
+                            loop_->queueInLoop([conn = shared_from_this()]()
+                                               { conn->writeCompleteCallback_(conn); });
                         }
 
                         if (state_ == kDisconnecting)
@@ -289,15 +312,15 @@ namespace reactor
             }
             else
             {
-                LOG_SYSERR<< "TcpConnection::handleWrite()";
+                LOG_SYSERR << "TcpConnection::handleWrite()";
             }
         }
 
         void TcpConnection::handleError()
         {
             int err = sockets::getSocketError(channel_->fd());
-            LOG_SYSERR<< "TcpConnection::handleError [" << name_
-                      << "] - SO_ERROR = " << err << " " << strerror(err);
+            LOG_SYSERR << "TcpConnection::handleError [" << name_
+                       << "] - SO_ERROR = " << err << " " << strerror(err);
         }
 
         void TcpConnection::handleClose()

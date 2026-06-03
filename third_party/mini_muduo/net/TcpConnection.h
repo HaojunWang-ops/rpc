@@ -50,7 +50,9 @@ namespace reactor
             void setCloseCallback(const CloseCallback& cb)
             { closeCallback_ = cb; } 
            
-            
+           
+            void send(const std::string& message);
+            void send(std::string&& message);
             void send(const void* data, int len);
             void send(const StringPiece& message);
             void send(Buffer* buf);

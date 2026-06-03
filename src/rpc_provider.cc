@@ -5,12 +5,17 @@
 
 #include <arpa/inet.h>
 #include <google/protobuf/message.h>
-#include <iostream>
 #include <memory>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <iostream>
+
+RpcProvider::RpcProvider(size_t threadNum)
+    :threadNum_(threadNum),
+     business_thread_pool_(ThreadPool(threadNum_))
+{
+}
 
 void RpcProvider::NotifyService(google::protobuf::Service *service)
 {
@@ -37,6 +42,87 @@ void RpcProvider::onConnection(const reactor::net::TcpConnectionPtr &conn)
               << (conn->connected() ? "UP" : "DOWN") << std::endl;
 }
 
+void RpcProvider::doRpcTask(const reactor::net::TcpConnectionPtr& conn,
+                            std::string request_frame)
+{
+        const char* data = request_frame.data();
+        size_t len = request_frame.size();
+
+        std::shared_ptr<SimpleRpcController> controller(new SimpleRpcController);
+        if (len < 4)
+        {
+            controller->SetFailed("bad request frame");
+            SendRpcError(conn, controller);
+            return;
+        }
+
+        uint32_t header_size = 0;
+        ::memcpy(&header_size, data, sizeof(header_size));
+        header_size = ::ntohl(header_size);
+        
+        if (len < 4 + header_size)
+        {
+            controller->SetFailed("bad request frame");
+            SendRpcError(conn, controller);
+            return;
+        }
+
+        std::string header_str(data + 4, header_size);
+
+        myrpc::RpcHeader header;
+        if (!header.ParseFromString(header_str))
+        {
+            controller->SetFailed("parse rpc header failed");
+            SendRpcError(conn, controller);
+            return;
+        }
+
+        std::string service_name = header.service_name();
+        std::string method_name = header.method_name();
+        uint32_t args_size = header.args_size();
+
+        if (len != 4 + header_size + args_size)
+        {
+            controller->SetFailed("bad request frame");
+            SendRpcError(conn, controller);
+            return;
+        }
+
+        std::string args_str(data + 4 + header_size, args_size);
+
+        auto service_it = service_map_.find(service_name);
+        if (service_it == service_map_.end()){
+            controller->SetFailed("service not found");
+            SendRpcError(conn, controller);
+            return;
+        }
+
+        auto method_it = service_it->second.method_map.find(method_name);
+        if (method_it == service_it->second.method_map.end()){
+            controller->SetFailed("method not found");
+            SendRpcError(conn, controller);
+            return;
+        }
+
+        google::protobuf::Service* service = service_it->second.service;
+        const google::protobuf::MethodDescriptor* method = method_it->second;
+
+        std::shared_ptr<google::protobuf::Message> request(service->GetRequestPrototype(method).New());
+        if(!request->ParseFromString(args_str))
+        {
+            controller->SetFailed("parse request failed");
+            SendRpcError(conn, controller);
+            return;
+        }
+
+        std::shared_ptr<google::protobuf::Message> response(service->GetResponsePrototype(method).New());
+        
+        google::protobuf::Closure* done = SendResponseClosure([this, conn, controller, request, response](){
+            SendRpcResponse(conn, response, controller);
+        });
+
+        service->CallMethod(method, controller.get(), request.get(), response.get(), done);
+}
 void RpcProvider::onMessage(const reactor::net::TcpConnectionPtr &conn,
                             reactor::net::Buffer *buffer,
                             reactor::Timestamp receive_time)
@@ -54,114 +140,26 @@ void RpcProvider::onMessage(const reactor::net::TcpConnectionPtr &conn,
             return;
         }
 
-        if (total_size < 4)
-        {
-            conn->shutdown();
-            return;
-        }
-
-        auto controller = std::make_unique<SimpleRpcController>();
-
         buffer->retrieve(4);
 
-        uint32_t header_size = 0;
-        ::memcpy(&header_size, buffer->peek(), sizeof(header_size));
-        header_size = ::ntohl(header_size);
-        buffer->retrieve(4);
+        std::string request_frame(total_size, '\0');
+        ::memcpy(request_frame.data(), buffer->peek(), total_size);
+        buffer->retrieve(total_size);
 
-        uint32_t body_size = total_size - 4;
-        if (header_size > body_size)
-        {
-            conn->shutdown();
-            return;
-        }
+        business_thread_pool_.submit([this, conn, request_frame = std::move(request_frame)]() mutable{
+            doRpcTask(conn, std::move(request_frame));
+            std::cout << "[business thread] id = "
+                << std::this_thread::get_id()
+                << std::endl;
+        });
 
-        std::string header_str(header_size, '\0');
-        ::memcpy(header_str.data(), buffer->peek(), header_size);
-        buffer->retrieve(header_size);
 
-        myrpc::RpcHeader header;
-        if (!header.ParseFromString(header_str))
-        {
-            std::cerr << "parse rpc header failed\n";
-            // shutdown() or handleclose()
-            conn->shutdown();
-            return;
-        }
-
-        uint32_t args_size = header.args_size();
-        uint32_t real_args_size = body_size - header_size;
-        if (args_size != real_args_size)
-        {
-            conn->shutdown();
-            return;
-        }
-
-        std::string service_name = header.service_name();
-        std::string method_name = header.method_name();
-
-        std::string args_str(args_size, '\0');
-        ::memcpy(args_str.data(), buffer->peek(), args_size);
-        buffer->retrieve(args_size);
-
-        auto service_it = service_map_.find(service_name);
-        if (service_it == service_map_.end())
-        {
-            std::string error = "service not found " + service_name + '\n';
-            std::cerr << error;
-
-            controller->SetFailed(1001, error);
-            SendRpcError(conn, controller.get());
-            conn->shutdown();
-            return;
-        }
-
-        auto method_it = service_it->second.method_map.find(method_name);
-        if (method_it == service_it->second.method_map.end())
-        {
-            std::string error = "method not found " + method_name + '\n';
-            std::cerr << error;
-
-            controller->SetFailed(1002, error);
-            SendRpcError(conn, controller.get());
-            conn->shutdown();
-            return;
-        }
-
-        google::protobuf::Service *service = service_it->second.service;
-        const google::protobuf::MethodDescriptor *method_desc = method_it->second;
-
-        google::protobuf::Message *request = service->GetRequestPrototype(method_desc).New();
-        if (!request->ParseFromString(args_str))
-        {
-            std::string error = "parse request failed\n";
-            std::cerr << error;
-
-            controller->SetFailed(1003, error);
-            SendRpcError(conn, controller.get());
-
-            delete request;
-            conn->shutdown();
-            return;
-        }
-
-        google::protobuf::Message *response = service->GetResponsePrototype(method_desc).New();
-
-        auto raw_controller = controller.release();
-        google::protobuf::Closure *done = SendResponseClosure([this, conn, response, raw_controller, request]()
-                                                              {
-            SendRpcResponse(conn, response, raw_controller);
-            delete request;
-            delete response;
-            delete raw_controller; });
-
-        service->CallMethod(method_desc, raw_controller, request, response, done);
     }
 }
 
 bool RpcProvider::SendRpcResponse(const reactor::net::TcpConnectionPtr &conn,
-                                  google::protobuf::Message *response,
-                                  SimpleRpcController *controller)
+                                  std::shared_ptr<google::protobuf::Message> response,
+                                  std::shared_ptr<SimpleRpcController> controller)
 {
     std::string response_body;
 
@@ -169,7 +167,6 @@ bool RpcProvider::SendRpcResponse(const reactor::net::TcpConnectionPtr &conn,
     {
         if (!response->SerializeToString(&response_body))
         {
-            conn->shutdown();
             return false;
         }
     }
@@ -190,19 +187,21 @@ bool RpcProvider::SendRpcResponse(const reactor::net::TcpConnectionPtr &conn,
 
     uint32_t net_header_size = ::htonl(header_size);
     uint32_t net_total_size = ::htonl(total_size);
-
+ 
     std::string send_buf;
     send_buf.append(reinterpret_cast<char *>(&net_total_size), sizeof(total_size));
     send_buf.append(reinterpret_cast<char *>(&net_header_size), sizeof(net_header_size));
     send_buf.append(response_header_str);
-    send_buf.append(response_body);
-    conn->send(send_buf);
+    send_buf.append(response_body);    
+    conn->send(std::move(send_buf));
 
+
+    
     return true;
 }
 
 void RpcProvider::SendRpcError(const reactor::net::TcpConnectionPtr &conn,
-                               SimpleRpcController *controller)
+                               std::shared_ptr<SimpleRpcController> controller)
 {
     SendRpcResponse(conn, nullptr, controller);
 }
@@ -226,7 +225,8 @@ void RpcProvider::Run(const std::string &ip, uint16_t port)
         {
             this->onMessage(conn, buffer, receive_time);
         });
-
+    
+    business_thread_pool_.start();
     server.start();
     loop.loop();
 }

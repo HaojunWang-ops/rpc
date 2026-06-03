@@ -4,7 +4,7 @@
 
 int main()
 {
-    RpcProvider provider;
+    RpcProvider provider(4);
 
     UserServiceImpl user_service;
 
