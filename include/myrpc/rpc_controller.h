@@ -1,19 +1,22 @@
 #pragma once
 
+#include "rpc_header.pb.h"
+
 #include <google/protobuf/service.h>
 #include <string>
 
 class SimpleRpcController : public google::protobuf::RpcController {
 public:
     void Reset() override {
-        failed_ = false;
         canceled_ = false;
         on_cancel_ = nullptr;
+
+        error_code_ = myrpc::RPC_OK;
         error_text_.clear();
     }
 
     bool Failed() const override {
-        return failed_;
+        return (error_code_ == myrpc::RPC_OK);
     }
 
     std::string ErrorText() const override {
@@ -22,18 +25,22 @@ public:
 
     void StartCancel() override;
 
-    void SetFailed(const std::string& reason) override {
-        failed_ = true;
-        error_text_ = reason;
+    void SetFailed(const std::string& reason) override
+    {
+
     }
 
-    void SetFailed(int code, const std::string& reason) {
-        failed_ = true;
+    void SetFailed(myrpc::RpcErrorCode code)
+    {
+        error_code_ = code;
+    }
+
+    void SetFailed(myrpc::RpcErrorCode code, const std::string& reason) {
         error_code_ = code;
         error_text_ = reason;
     }
 
-    int error_code() { return error_code_; }
+    myrpc::RpcErrorCode error_code() { return error_code_; }
     const std::string& error_text() { return error_text_; }
      
     bool IsCanceled() const override {
@@ -43,10 +50,9 @@ public:
     void NotifyOnCancel(google::protobuf::Closure* callback) override;
 
 private:
-    bool failed_ = false;
     bool canceled_ = false;
     google::protobuf::Closure* on_cancel_;
 
-    int error_code_;
+    myrpc::RpcErrorCode error_code_;
     std::string error_text_;
 };

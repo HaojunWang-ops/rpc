@@ -2,6 +2,19 @@ syntax = "proto3";
 
 package myrpc;
 
+enum RpcErrorCode{
+    RPC_OK = 0;
+    
+    RPC_BAD_REQUEST = 1000;
+    RPC_FRAME_TOO_LARGE = 1001;
+    RPC_PARSE_HEADER_FAILED = 1002;
+    RPC_SERVICE_NOT_FOUND = 1003;
+    RPC_METHOD_NOT_FOUND = 1004;
+    RPC_PARSE_REQUEST_FAILED = 1005;
+    RPC_SERIALIZE_RESPONSE_FAILED = 1006;
+    RPC_INTERNAL_ERROR = 1007;
+}
+
 message RpcHeader {
     string service_name = 1;
     string method_name = 2;
@@ -9,7 +22,7 @@ message RpcHeader {
 }
 
 message RpcResponseHeader {
-    int32 error_code = 1;
+    RpcErrorCode error_code = 1;
     string error_text = 2;
     uint32 response_size = 3;
 }
