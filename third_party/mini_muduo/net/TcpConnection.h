@@ -29,7 +29,8 @@ namespace reactor
             const InetAddress& peerAddress() { return peerAddr_; }
             bool connected() const { return state_ == kConnected; }
             bool disconnected() const { return state_ == kDisconnected; }
-            
+            bool disconnecting() const { return state_ == kDisconnecting; }
+
             void setConnectionCallback(const ConnectionCallback& cb)
             { connectionCallback_ = cb; }
 

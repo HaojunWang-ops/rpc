@@ -51,7 +51,7 @@ endfunction()
 # ============================================================
 
 set(MINI_MUDUO_ROOT
-    "${CMAKE_CURRENT_SOURCE_DIR}/../mini_muduo"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/mini_muduo"
     CACHE PATH
     "Path to mini_muduo project"
 )
@@ -171,11 +171,10 @@ add_library(myrpc_core STATIC
     src/rpc_provider.cc
     src/rpc_controller.cc
     src/ThreadPool.cc
-    src/common.cc
 )
 
 target_include_directories(myrpc_core PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/myrpc
 )
 
 target_link_libraries(myrpc_core PUBLIC
@@ -192,7 +191,7 @@ myrpc_apply_sanitizers(myrpc_core)
 # ============================================================
 
 add_library(user_service STATIC
-    services/user_service.cc
+    services/user_services.cc
 )
 
 target_include_directories(user_service PUBLIC
@@ -217,3 +216,25 @@ endif()
 if (MYRPC_BUILD_TESTS)
     add_subdirectory(tests)
 endif()
+
+#[[
+third_party/mini_muduo
+        │
+        ▼
+   mini_muduo
+        │
+        ▼
+   myrpc_core ◄──────── myrpc_protocol ◄──── src/rpc_header.proto
+        ▲                     │
+        │                     ▼
+        │                protobuf
+        │
+        ├──────────── Threads::Threads
+        │
+        ▼
+   user_service ◄──── user_proto ◄──── proto/user.proto
+        │
+        ▼
+   provider_main
+
+]]

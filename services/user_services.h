@@ -1,5 +1,5 @@
 #include "rpc_provider.h"
-#include "examples/user.pb.h"
+#include "user.pb.h"
 
 #include <google/protobuf/stubs/common.h>
 #include <iostream>

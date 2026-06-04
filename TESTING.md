@@ -14,7 +14,7 @@
 - [x] InvalidIp
 - [x] ServiceNotFound
 - [x] MethodNotFound
-- [x] BadPacket
+- [ ] BadPacket
 
 ### 结果
 同步短连接 RPC 主链路通过。

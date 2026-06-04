@@ -50,14 +50,19 @@ inline bool ReadN(int fd, void* buf, size_t n)
         }
         else if (ret <= 0)
         {
-            if (errno == EAGAIN)
+            if (errno == EINTR)
             {
                 continue;
             }
-            else
+
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
+                std::cerr << "read timeout\n";
                 return false;
             }
+            
+            perror("read");
+            return false;
         }
     }
     return true;

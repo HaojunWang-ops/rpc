@@ -1,6 +1,6 @@
 #include "common.h"
 #include "rpc_channel.h"
-#include "examples/user.pb.h"
+#include "user.pb.h"
 #include "rpc_controller.h"
 
 #include <google/protobuf/stubs/common.h>

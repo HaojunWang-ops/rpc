@@ -1,96 +1,14 @@
-#include "common.h"
+#include "user.pb.h"
 #include "rpc_header.pb.h"
+#include "common.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
-
 #include <cstring>
 #include <iostream>
 #include <string>
-
-void getResponse(int fd);
-
-int Connect()
-{
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
-    {
-        perror("socket");
-        return -1;
-    }
-
-    timeval tv{};
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = ::htons(8000);
-
-    if (::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) <= 0)
-    {
-        perror("inet_pton");
-        ::close(fd);
-        return -1;
-    }
-
-    if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
-    {
-        perror("connect");
-        ::close(fd);
-        return -1;
-    }
-
-    return fd;
-}
-
-void SendTotalSizeLessThan4()
-{
-    int fd = Connect();
-    if (fd < 0)
-        return;
-
-    uint32_t total_size = ::htonl(3);
-    WriteN(fd, &total_size, sizeof(total_size));
-
-    getResponse(fd);
-    std::cout << "sent bad packet: total_size < 4\n";
-    ::close(fd);
-}
-
-void SendHeaderSizeGreaterThanBody()
-{
-    int fd = Connect();
-    if (fd < 0)
-        return;
-
-    uint32_t total_size = ::htonl(4);    // body_size = total_size - 4 = 0
-    uint32_t header_size = ::htonl(100); // header_size > body_size
-
-    WriteN(fd, &total_size, sizeof(total_size));
-    WriteN(fd, &header_size, sizeof(header_size));
-
-    getResponse(fd);
-    std::cout << "sent bad packet: header_size > body_size\n";
-    ::close(fd);
-}
-
-void SendIncompletePacket()
-{
-    int fd = Connect();
-    if (fd < 0)
-        return;
-
-    uint32_t total_size = ::htonl(100);
-    WriteN(fd, &total_size, sizeof(total_size));
-
-    getResponse(fd);
-    std::cout << "sent incomplete packet\n";
-    ::close(fd);
-}
 
 void getResponse(int fd)
 {
@@ -149,8 +67,10 @@ void getResponse(int fd)
         return;
     }
 
+    std::cout << "error_code: " << response_header.error_code() << "error_text: " << response_header.error_text() << std::endl;
     if (response_header.error_code() != 0)
     {
+        std::cerr << "!!!!!" << std::endl;
         std::cerr << "[getResponse] server error: " << response_header.error_text() << std::endl;
         return;
     }
@@ -174,7 +94,7 @@ void getResponse(int fd)
     std::cerr << "[getResponse] ReadN 4 OK" << std::endl;
 
     // 注意：下面的代码存在未初始化的指针问题，仅作调试占位
-    google::protobuf::Message* response = nullptr;  // 原代码未初始化，这里临时设为 nullptr
+    google::protobuf::Message *response = nullptr; // 原代码未初始化，这里临时设为 nullptr
     if (response == nullptr || !response->ParseFromString(response_str))
     {
         std::cerr << "[getResponse] parse to response failed (response object not ready)" << std::endl;
@@ -185,11 +105,74 @@ void getResponse(int fd)
     ::close(fd);
 }
 
+int Connect()
+{
+    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+    {
+        perror("socket");
+        return -1;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = ::htons(8000);
+
+    if (::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) <= 0)
+    {
+        perror("inet_pton");
+        ::close(fd);
+        return -1;
+    }
+
+    if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
+    {
+        perror("connect");
+        ::close(fd);
+        return -1;
+    }
+
+    return fd;
+}
+
+void sendServiceNotFound()
+{
+    int fd = Connect();
+    if (fd < 0)
+        return;
+
+    myrpc::RpcHeader header;
+    header.set_service_name("demo.NotExistService");
+    header.set_method_name("Login");
+    header.set_args_size(0);
+
+    std::string header_str;
+    if (!header.SerializeToString(&header_str))
+    {
+        std::cout << "header serialize to strin failed";
+        std::cout << std::endl;
+        return;
+    }
+
+    uint32_t header_size = header_str.size();
+    uint32_t total_size = 4 + header_size;
+
+    uint32_t net_total_size = ::htonl(total_size);
+    uint32_t net_header_size = ::htonl(header_size);
+
+    WriteN(fd, &net_total_size, sizeof(net_total_size));
+    WriteN(fd, &net_header_size, sizeof(net_header_size));
+    WriteN(fd, header_str.data(), header_size);
+
+    getResponse(fd);
+
+    std::cout << "sent service not found" << std::endl;
+    ::close(fd);
+    return;
+}
 
 int main()
 {
-    SendTotalSizeLessThan4();
-    SendHeaderSizeGreaterThanBody();
-    SendIncompletePacket();
+    sendServiceNotFound();
     return 0;
 }

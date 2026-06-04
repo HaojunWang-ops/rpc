@@ -30,11 +30,16 @@ private:
                    reactor::net::Buffer* buffer,
                    reactor::Timestamp receive_time);
 
+    bool SendRpcFrame(const reactor::net::TcpConnectionPtr& conn,
+                      myrpc::RpcErrorCode error_code,
+                      const std::string& error_text,
+                      const std::string& response_body);
+    
     bool SendRpcResponse(const reactor::net::TcpConnectionPtr& conn,
                          std::shared_ptr<google::protobuf::Message> response,
                          std::shared_ptr<SimpleRpcController> controller);                        
     
-    void SendRpcError(const reactor::net::TcpConnectionPtr& conn,
+    bool SendRpcError(const reactor::net::TcpConnectionPtr& conn,
                       std::shared_ptr<SimpleRpcController> controller);
     
     void doRpcTask(const reactor::net::TcpConnectionPtr& conn,
@@ -45,6 +50,8 @@ private:
     }
 
 private:
+    static constexpr uint32_t kMaxRpcFrameSize = 64 * 1024 *1024;
+
     struct ServiceInfo {
         google::protobuf::Service* service;
         std::unordered_map<std::string, const google::protobuf::MethodDescriptor*> method_map;
