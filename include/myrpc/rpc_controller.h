@@ -7,6 +7,15 @@
 
 class SimpleRpcController : public google::protobuf::RpcController {
 public:
+    SimpleRpcController()
+    {
+        canceled_ = false;
+        on_cancel_ = nullptr;
+
+        error_code_ = myrpc::RPC_OK;
+        error_text_.clear();
+    }
+
     void Reset() override {
         canceled_ = false;
         on_cancel_ = nullptr;
@@ -16,7 +25,7 @@ public:
     }
 
     bool Failed() const override {
-        return (error_code_ == myrpc::RPC_OK);
+        return (error_code_ != myrpc::RPC_OK);
     }
 
     std::string ErrorText() const override {
@@ -27,7 +36,8 @@ public:
 
     void SetFailed(const std::string& reason) override
     {
-
+        error_code_ = myrpc::RPC_INTERNAL_ERROR;
+        error_text_ = reason;
     }
 
     void SetFailed(myrpc::RpcErrorCode code)

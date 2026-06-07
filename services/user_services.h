@@ -1,8 +1,12 @@
 #include "rpc_provider.h"
 #include "user.pb.h"
+#include "rpc_header.pb.h"
+#include "rpc_controller.h"
 
 #include <google/protobuf/stubs/common.h>
 #include <iostream>
+#include <thread>
+#include <chrono>
 
 class UserServiceImpl : public demo::UserService
 {
@@ -17,15 +21,11 @@ public:
         std::cout << "password = " << request->password() << std::endl;
 
         if (request->name().empty()){
-            controller->SetFailed("login name is empty");
-
-            if (done){
-                done->Run();
-            }
-            return;
+            response->set_code(1);
+            response->set_message("login with empty name");
+            response->set_success(false);
         }
-
-        if (request->name() == "haojun" &&
+        else   if (request->name() == "haojun" &&
             request->password() == "123456")
         {
             response->set_code(0);
@@ -56,18 +56,16 @@ public:
         std::cout << "password= " << request->password() << std::endl;
 
         if (request->name().empty()){
-            controller->SetFailed("register name is empty");
-
-            if (done){
-                done->Run();
-            }
-
-            return;
+            response->set_code(1);
+            response->set_message("register with empty name");
+            response->set_success(false);
         }
-        
-        response->set_code(0);
-        response->set_message("register success");
-        response->set_success(true);
+        else
+        {
+            response->set_code(0);
+            response->set_message("register success");
+            response->set_success(true);
+        }
 
         if (done){
             done->Run();

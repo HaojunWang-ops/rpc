@@ -69,3 +69,31 @@ if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/threadpool_test.cc)
 
     myrpc_apply_sanitizers(threadpool_test)
 endif()
+
+if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/1000request_test.cc)
+    add_executable(1000request_test
+        1000request_test.cc
+    )
+
+    target_link_libraries(1000request_test PRIVATE
+        myrpc_core
+        Threads::Threads
+        user_proto
+    )
+
+    myrpc_apply_sanitizers(1000request_test)
+endif()
+
+if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_tcp_fragment.cc)
+    add_executable(test_tcp_fragment
+        test_tcp_fragment.cc
+    )
+
+    target_link_libraries(test_tcp_fragment PRIVATE
+        myrpc_core
+        Threads::Threads
+        user_proto
+    )
+
+    myrpc_apply_sanitizers(test_tcp_fragment)
+endif()
