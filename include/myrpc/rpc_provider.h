@@ -30,16 +30,21 @@ private:
                    reactor::net::Buffer* buffer,
                    reactor::Timestamp receive_time);
 
+    //SendRpcFrame负责拼接协议格式，发送
     bool SendRpcFrame(const reactor::net::TcpConnectionPtr& conn,
+                      uint64_t request_id,
                       myrpc::RpcErrorCode error_code,
                       const std::string& error_text,
                       const std::string& response_body);
-    
+   
+    //SendRpcResponse 和 SendRpcError 负责处理response
     bool SendRpcResponse(const reactor::net::TcpConnectionPtr& conn,
+                         uint64_t request_id,
                          std::shared_ptr<google::protobuf::Message> response,
                          std::shared_ptr<SimpleRpcController> controller);                        
     
     bool SendRpcError(const reactor::net::TcpConnectionPtr& conn,
+                      uint64_t request_id,
                       std::shared_ptr<SimpleRpcController> controller);
     
     void doRpcTask(const reactor::net::TcpConnectionPtr& conn,

@@ -57,7 +57,7 @@ void RpcProvider::doRpcTask(const reactor::net::TcpConnectionPtr& conn,
         if (total_size < 4 + header_size)
         {
             controller->SetFailed(myrpc::RPC_BAD_REQUEST, "total_size < 4 + header_size");
-            SendRpcError(conn, controller);
+            SendRpcError(conn, 0, controller);
             conn->shutdown();
             return;
         }
@@ -68,19 +68,27 @@ void RpcProvider::doRpcTask(const reactor::net::TcpConnectionPtr& conn,
         if (!header.ParseFromString(header_str))
         {
             controller->SetFailed(myrpc::RPC_PARSE_HEADER_FAILED, "parse rpc header failed");
-            SendRpcError(conn, controller);
+            SendRpcError(conn, 0, controller);
             conn->shutdown();
             return;
         }
 
         std::string service_name = header.service_name();
         std::string method_name = header.method_name();
+        uint64_t request_id = header.request_id();
         uint32_t args_size = header.args_size();
 
+        if (request_id == 0)
+        {
+            controller->SetFailed(myrpc::RPC_BAD_REQUEST, "request_id == 0");
+            SendRpcError(conn, 0, controller);
+            conn->shutdown();
+            return;
+        }
         if (total_size != 4 + header_size + args_size)
         {
             controller->SetFailed(myrpc::RPC_BAD_REQUEST, "total_size != 4 + header_size + args_size");
-            SendRpcError(conn, controller);
+            SendRpcError(conn, request_id, controller);
             conn->shutdown();
             return;
         }
@@ -90,14 +98,14 @@ void RpcProvider::doRpcTask(const reactor::net::TcpConnectionPtr& conn,
         auto service_it = service_map_.find(service_name);
         if (service_it == service_map_.end()){
             controller->SetFailed(myrpc::RPC_SERVICE_NOT_FOUND, "service not found");
-            SendRpcError(conn, controller);
+            SendRpcError(conn, request_id, controller);
             return;
         }
 
         auto method_it = service_it->second.method_map.find(method_name);
         if (method_it == service_it->second.method_map.end()){
             controller->SetFailed(myrpc::RPC_METHOD_NOT_FOUND, "method not found");
-            SendRpcError(conn, controller);
+            SendRpcError(conn, request_id, controller);
             return;
         }
 
@@ -108,15 +116,15 @@ void RpcProvider::doRpcTask(const reactor::net::TcpConnectionPtr& conn,
         if(!request->ParseFromString(args_str))
         {
             controller->SetFailed(myrpc::RPC_PARSE_REQUEST_FAILED, "parse request failed");
-            SendRpcError(conn, controller);
+            SendRpcError(conn, request_id, controller);
             conn->shutdown();
             return;
         }
 
         std::shared_ptr<google::protobuf::Message> response(service->GetResponsePrototype(method).New());
         
-        google::protobuf::Closure* done = SendResponseClosure([this, conn, controller, request, response](){
-            SendRpcResponse(conn, response, controller);
+        google::protobuf::Closure* done = SendResponseClosure([this, conn, controller, request, response, request_id](){
+            SendRpcResponse(conn, request_id, response, controller);
         });
 
         service->CallMethod(method, controller.get(), request.get(), response.get(), done);
@@ -145,7 +153,7 @@ void RpcProvider::onMessage(const reactor::net::TcpConnectionPtr &conn,
         {
             
             controller->SetFailed(myrpc::RPC_BAD_REQUEST, "total_size < 4 bytes");
-            SendRpcError(conn, controller);
+            SendRpcError(conn, 0, controller);
             conn->shutdown();
             buffer->retrieveAll();
             return;
@@ -154,7 +162,7 @@ void RpcProvider::onMessage(const reactor::net::TcpConnectionPtr &conn,
         if (total_size > kMaxRpcFrameSize)
         {
             controller->SetFailed(myrpc::RPC_BAD_REQUEST, "total_size > kMaxRpcFrmaeSize");
-            SendRpcError(conn, controller);
+            SendRpcError(conn, 0, controller);
             conn->shutdown();
             buffer->retrieveAll();
             return;
@@ -183,11 +191,13 @@ void RpcProvider::onMessage(const reactor::net::TcpConnectionPtr &conn,
 }
 
 bool RpcProvider::SendRpcFrame(const reactor::net::TcpConnectionPtr& conn,
+                               uint64_t request_id,
                                myrpc::RpcErrorCode error_code,
                                const std::string& error_text,
                                const std::string& response_body)
 {
     myrpc::RpcResponseHeader response_header;
+    response_header.set_request_id(request_id);
     response_header.set_error_code(error_code);
     response_header.set_error_text(error_text);
     response_header.set_response_size(static_cast<uint32_t>(response_body.size()));
@@ -215,6 +225,7 @@ bool RpcProvider::SendRpcFrame(const reactor::net::TcpConnectionPtr& conn,
     return true;
 }
 bool RpcProvider::SendRpcResponse(const reactor::net::TcpConnectionPtr &conn,
+                                  uint64_t request_id,
                                   std::shared_ptr<google::protobuf::Message> response,
                                   std::shared_ptr<SimpleRpcController> controller)
 {
@@ -226,19 +237,21 @@ bool RpcProvider::SendRpcResponse(const reactor::net::TcpConnectionPtr &conn,
         {
             controller->SetFailed(myrpc::RPC_INTERNAL_ERROR, "serialize response failed");
             return SendRpcFrame(conn,
+                                request_id,
                                 myrpc::RPC_INTERNAL_ERROR,
                                 "serialize response failed",
                                 "");
         }
     }
 
-    return SendRpcFrame(conn, controller->error_code(), controller->error_text(), std::move(response_body));
+    return SendRpcFrame(conn, request_id, controller->error_code(), controller->error_text(), std::move(response_body));
 }
 
 bool RpcProvider::SendRpcError(const reactor::net::TcpConnectionPtr &conn,
+                               uint64_t request_id,
                                std::shared_ptr<SimpleRpcController> controller)
 {
-    return SendRpcFrame(conn, controller->error_code(), controller->error_text(), "");
+    return SendRpcFrame(conn, request_id, controller->error_code(), controller->error_text(), "");
 }
 
 void RpcProvider::Run(const std::string &ip, uint16_t port)

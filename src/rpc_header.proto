@@ -4,6 +4,11 @@ package myrpc;
 
 enum RpcErrorCode{
     RPC_OK = 0;
+
+   RPC_SEND_FAILED = 100;
+   RPC_CONNECTION_FAILED = 101;
+    RPC_RECV_FAILED = 102;
+    RPC_CALL_TIMEOUT = 103;
     
     RPC_BAD_REQUEST = 1000;
     RPC_FRAME_TOO_LARGE = 1001;
@@ -18,14 +23,16 @@ enum RpcErrorCode{
 }
 
 message RpcHeader {
-    string service_name = 1;
-    string method_name = 2;
-    uint32 args_size = 3;
+    uint64 request_id = 1;
+    string service_name = 2;
+    string method_name = 3;
+    uint32 args_size = 4;
 }
 
 message RpcResponseHeader {
-    RpcErrorCode error_code = 1;
-    string error_text = 2;
-    uint32 response_size = 3;
+    uint64 request_id = 1;
+    RpcErrorCode error_code = 2;
+    string error_text = 3;
+    uint32 response_size = 4;
 }
 
