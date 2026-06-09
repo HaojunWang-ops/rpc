@@ -29,16 +29,6 @@ public:
 
     bool start();
 
-    bool Connected()
-    {
-        return connected_;
-    }
-
-    const std::string LastError()
-    {
-        return last_error_;
-    }
-
     void CallMethod(const google::protobuf::MethodDescriptor* method,
                     google::protobuf::RpcController* controller,
                     const google::protobuf::Message* request,
@@ -53,11 +43,23 @@ private:
     void readerInLoop();
     void handleResponseFrame(myrpc::RpcResponseHeader header, const std::string& body);
     void failAllPending(const std::string& reason);
-    void handleConnectionLost();
+    void handleConnectionLost(const std::string& reason);
+
+    void setLastError(const std::string& error);
+    std::string LastError();
+    bool connected();
+
+    void erasePending(uint64_t request_id);
+    std::shared_ptr<PendingCall> erasePendingAndGet(uint64_t request_id);
+    void finishCall(const std::shared_ptr<PendingCall>& call, const std::string& error);
+
+    void closeSocket();
 private:
     std::string ip_;
     uint16_t port_;
+    
     int sockfd_ = -1;
+    std::mutex close_mutex_;
 
     std::atomic<uint64_t> next_request_id_{1};
 
@@ -69,9 +71,12 @@ private:
     std::thread reader_thread_;
     std::atomic<bool> running_{false};
 
-    bool connected_;
+    std::atomic<bool> connected_{false};
 
     //controller中error_text_表示这次rpc的错误原因
     //last_error_表示channel层最近的错误原因
      std::string last_error_;
+     std::mutex error_mutex_;
+
+     const int timeout_ms_ = 1000;
 };

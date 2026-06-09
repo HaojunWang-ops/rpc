@@ -113,6 +113,8 @@ int main()
     TestLoginSuccess(stub);
     TestLoginWrongPassword(stub);
     TestLoginEmptyName(stub);
+    //test for rpc call timeout
+    //sleep(10);
     TestRegisterSuccess(stub);
     TestRegisterEmptyName(stub);
 

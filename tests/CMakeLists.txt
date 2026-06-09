@@ -30,9 +30,9 @@ if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/concurrent_test.cc)
 endif()
 
 
-if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/bad_packet_test.cc)
+if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/bad_packet_test.cc)
     add_executable(bad_packet_test
-        bad_packet_test.cc
+        integration/bad_packet_test.cc
     )
 
     target_link_libraries(bad_packet_test PRIVATE
@@ -43,9 +43,9 @@ if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/bad_packet_test.cc)
     myrpc_apply_sanitizers(bad_packet_test)
 endif()
 
-if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/service_not_found_test.cc)
+if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/service_not_found_test.cc)
     add_executable(service_not_found_test
-        service_not_found_test.cc
+        integration/service_not_found_test.cc
     )
 
     target_link_libraries(service_not_found_test PRIVATE
@@ -57,9 +57,9 @@ if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/service_not_found_test.cc)
     myrpc_apply_sanitizers(service_not_found_test)
 endif()
 
-if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/threadpool_test.cc)
+if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/uint/threadpool_test.cc)
     add_executable(threadpool_test
-        threadpool_test.cc
+        unit/threadpool_test.cc
     )
 
     target_link_libraries(threadpool_test PRIVATE
@@ -70,9 +70,9 @@ if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/threadpool_test.cc)
     myrpc_apply_sanitizers(threadpool_test)
 endif()
 
-if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/1000request_test.cc)
+if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/1000request_test.cc)
     add_executable(1000request_test
-        1000request_test.cc
+        integration/1000request_test.cc
     )
 
     target_link_libraries(1000request_test PRIVATE
@@ -84,9 +84,9 @@ if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/1000request_test.cc)
     myrpc_apply_sanitizers(1000request_test)
 endif()
 
-if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_tcp_fragment.cc)
+if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_tcp_fragment.cc)
     add_executable(test_tcp_fragment
-        test_tcp_fragment.cc
+        integration/test_tcp_fragment.cc
     )
 
     target_link_libraries(test_tcp_fragment PRIVATE
@@ -96,4 +96,32 @@ if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/test_tcp_fragment.cc)
     )
 
     myrpc_apply_sanitizers(test_tcp_fragment)
+endif()
+
+if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/batch_async.cc)
+    add_executable(batch_async
+        integration/batch_async.cc
+    )
+
+    target_link_libraries(batch_async PRIVATE
+        myrpc_core
+        Threads::Threads
+        user_proto
+    )
+
+    myrpc_apply_sanitizers(batch_async)
+endif()
+
+if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/multithread_call.cc)
+    add_executable(multithread_call
+        integration/multithread_call.cc
+    )
+
+    target_link_libraries(multithread_call PRIVATE
+        myrpc_core
+        Threads::Threads
+        user_proto
+    )
+
+    myrpc_apply_sanitizers(multithread_call)
 endif()
