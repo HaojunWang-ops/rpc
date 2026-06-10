@@ -39,6 +39,7 @@ RpcChannel::RpcChannel(const std::string ip, uint16_t port)
 {
     connected_ = false;
     running_ = false;
+    sockfd_ = -1;
 }
 
 RpcChannel::~RpcChannel()
@@ -119,10 +120,8 @@ void RpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
 {
     if (!running_.load(std::memory_order_acquire) || !connected_.load(std::memory_order_acquire))
     {
-        if (controller)
-        {
-            controller->SetFailed("channel not connected");
-        }
+
+        finishEarlyError(controller, done, "channel not connected");
         return;
     }
 
@@ -138,10 +137,7 @@ void RpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
     std::string args;
     if (!request->SerializeToString(&args))
     {
-        if (controller)
-        {
-            controller->SetFailed("request SerializedToString failed");
-        }
+        finishEarlyError(controller, done, "request SerializedToString failed");
         return;
     }
 
@@ -154,10 +150,7 @@ void RpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
     std::string header_str;
     if (!header.SerializeToString(&header_str))
     {
-        if (controller)
-        {
-            controller->SetFailed("header SerializeToString failed");
-        }
+        finishEarlyError(controller, done, "header SerializeToString failed");
         return;
     }
 
@@ -178,8 +171,7 @@ void RpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
         auto [it, inserted] = pending_.emplace(request_id, call);
         if (!inserted)
         {
-            controller->SetFailed("duplicate request_id");
-            done->Run();
+            finishEarlyError(controller, done, "duplicate request_id");
             return;
         }
     }
@@ -192,11 +184,10 @@ void RpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
 
     if (!write_ok)
     {
-        erasePending(request_id);
-
-        if (controller)
+        auto failed_call = erasePendingAndGet(request_id);
+        if (failed_call)
         {
-            controller->SetFailed("send rpc request failed");
+            finishCallWithError(failed_call, "send rpc request failed");
         }
 
         handleConnectionLost("send rpc request failed");
@@ -306,7 +297,7 @@ void RpcChannel::handleConnectionLost(const std::string &reason)
     }
     for (auto &[id, call] : pending)
     {
-        finishCall(call, reason);
+        finishCallWithError(call, reason);
     }
 }
 
@@ -320,185 +311,194 @@ void RpcChannel::handleResponseFrame(myrpc::RpcResponseHeader header, const std:
         return;
     }
 
+    auto call = erasePendingAndGet(request_id);
+
+    if (!call)
     {
-        auto call = erasePendingAndGet(request_id);
+        LOG_WARN << "pending call not found, request id = " << request_id;
+        return;
+    }
 
-        if (!call)
-        {
-            LOG_WARN << "pending call not found, request id = " << request_id;
-            return;
-        }
+    if (header.error_code() != myrpc::RPC_OK)
+    {
 
-        if (header.error_code() != myrpc::RPC_OK)
-        {
-            if (call->controller)
-            {
-                call->controller->SetFailed(header.error_text());
-            }
-        }
-        else
-        {
-            if (!call->response)
-            {
-                if (call->controller)
-                {
-                    call->controller->SetFailed("response is null");
-                }
-            }
-            else if (!call->response->ParseFromString(body))
-            {
-                if (call->controller)
-                {
-                    call->controller->SetFailed("response parse from string failed");
-                }
-            }
-        }
+        finishCallWithError(call, header.error_text());
+        return;
+    }
+    if (!call->response)
+    {
+        finishCallWithError(call, "response is null");
+        return;
+    }
+    if (!call->response->ParseFromString(body))
+    {
+        finishCallWithError(call, "response parse from string failed");
+        return;
+    }
 
-        {
-            std::lock_guard<std::mutex> lock(call->mutex);
-            call->finished = true;
-        }
+    finishCall(call);
+}
+void RpcChannel::setLastError(const std::string &error)
+{
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    last_error_ = error;
+}
 
-        call->cv.notify_one();
+std::string RpcChannel::LastError()
+{
+    std::lock_guard<std::mutex> lock(error_mutex_);
+    return last_error_;
+}
 
-        if (call->done)
-        {
-            call->done->Run();
-        }
+void RpcChannel::erasePending(uint64_t request_id)
+{
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+    pending_.erase(request_id);
+}
+
+std::shared_ptr<PendingCall> RpcChannel::erasePendingAndGet(uint64_t request_id)
+{
+    std::lock_guard<std::mutex> lock(pending_mutex_);
+
+    auto it = pending_.find(request_id);
+    if (it == pending_.end())
+    {
+        return nullptr;
+    }
+    else
+    {
+        auto pending = it->second;
+        pending_.erase(it);
+        return pending;
     }
 }
-    void RpcChannel::setLastError(const std::string &error)
+
+void RpcChannel::finishEarlyError(google::protobuf::RpcController* controller,
+                                  google::protobuf::Closure* done,
+                                  const std::string& error)
+{
+    if (controller)
     {
-        std::lock_guard<std::mutex> lock(error_mutex_);
-        last_error_ = error;
+        controller->SetFailed(error);
+    }
+    if (done)
+    {
+        done->Run();
+    }
+}
+void RpcChannel::finishCall(const std::shared_ptr<PendingCall> &call)
+{
+    if (!call)
+    {
+        return;
     }
 
-    std::string RpcChannel::LastError()
+    auto *done = call->done;
+    call->done = nullptr;
     {
-        std::lock_guard<std::mutex> lock(error_mutex_);
-        return last_error_;
+        std::lock_guard<std::mutex> lock(call->mutex);
+        call->finished = true;
+    }
+    call->cv.notify_one();
+    if (done)
+    {
+        done->Run();
+    }
+}
+
+void RpcChannel::finishCallWithError(const std::shared_ptr<PendingCall> &call,
+                                     const std::string &error)
+{
+    if (!call)
+    {
+        return;
     }
 
-    void RpcChannel::erasePending(uint64_t request_id)
+    if (call->controller && !error.empty())
     {
-        std::lock_guard<std::mutex> lock(pending_mutex_);
-        pending_.erase(request_id);
+        call->controller->SetFailed(error);
     }
 
-    std::shared_ptr<PendingCall> RpcChannel::erasePendingAndGet(uint64_t request_id)
-    {
-        std::lock_guard<std::mutex> lock(pending_mutex_);
+    finishCall(call);
+}
 
-        auto it = pending_.find(request_id);
-        if (it == pending_.end())
+void RpcChannel::closeSocket()
+{
+    std::lock_guard<std::mutex> lock(close_mutex_);
+
+    int fd = sockfd_;
+    sockfd_ = -1;
+
+    if (fd >= 0)
+    {
+        ::shutdown(fd, SHUT_RDWR);
+        ::close(fd);
+    }
+}
+
+bool RpcChannel::WriteN(const void *buf, size_t n)
+{
+    const char *p = reinterpret_cast<const char *>(buf);
+    size_t left = n;
+    while (left > 0)
+    {
+        if (!running_.load(std::memory_order_acquire))
         {
-            return nullptr;
+            errno = ECANCELED;
+            return false;
+        }
+
+        ssize_t nw = ::write(sockfd_, p, left);
+        if (nw > 0)
+        {
+            p += nw;
+            left -= nw;
+        }
+        else if (nw == 0)
+        {
+            errno = EPIPE;
+            return false;
         }
         else
         {
-            auto pending = it->second;
-            pending_.erase(it);
-            return pending;
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            return false;
         }
     }
-    void RpcChannel::finishCall(const std::shared_ptr<PendingCall> &call,
-                                const std::string &error)
+    return true;
+}
+
+bool RpcChannel::ReadN(void *buf, size_t n)
+{
+    char *p = reinterpret_cast<char *>(buf);
+    size_t left = n;
+    while (left > 0)
     {
-        if (call->controller && !error.empty())
+        if (!running_.load(std::memory_order_acquire))
         {
-            call->controller->SetFailed(error);
+            errno = ECANCELED;
+            return false;
         }
 
+        ssize_t nr = ::read(sockfd_, p, left);
+        if (nr > 0)
         {
-            std::lock_guard<std::mutex> lock(call->mutex);
-            call->finished = true;
+            p += nr;
+            left -= nr;
         }
-
-        call->cv.notify_one();
-
-        if (call->done)
+        else if (nr == 0)
         {
-            call->done->Run();
+            return false;
         }
-    }
-
-    void RpcChannel::closeSocket()
-    {
-        std::lock_guard<std::mutex> lock(close_mutex_);
-
-        int fd = sockfd_;
-        sockfd_ = -1;
-
-        if (fd >= 0)
+        else
         {
-            ::shutdown(fd, SHUT_RDWR);
-            ::close(fd);
+            if (errno == EINTR)
+                continue;
+            return false;
         }
     }
-
-    bool RpcChannel::WriteN(const void *buf, size_t n)
-    {
-        const char *p = reinterpret_cast<const char *>(buf);
-        size_t left = n;
-        while (left > 0)
-        {
-            if (!running_.load(std::memory_order_acquire))
-            {
-                errno = ECANCELED;
-                return false;
-            }
-
-            ssize_t nw = ::write(sockfd_, p, left);
-            if (nw > 0)
-            {
-                p += nw;
-                left -= nw;
-            }
-            else if (nw == 0)
-            {
-                errno = EPIPE;
-                return false;
-            }
-            else
-            {
-                if (errno == EINTR)
-                {
-                    continue;
-                }
-                return false;
-            }
-        }
-        return true;
-    }
-
-    bool RpcChannel::ReadN(void *buf, size_t n)
-    {
-        char *p = reinterpret_cast<char *>(buf);
-        size_t left = n;
-        while (left > 0)
-        {
-            if (!running_.load(std::memory_order_acquire))
-            {
-                errno = ECANCELED;
-                return false;
-            }
-
-            ssize_t nr = ::read(sockfd_, p, left);
-            if (nr > 0)
-            {
-                p += nr;
-                left -= nr;
-            }
-            else if (nr == 0)
-            {
-                return false;
-            }
-            else
-            {
-                if (errno == EINTR)
-                    continue;
-                return false;
-            }
-        }
-        return true;
-    }
+    return true;
+}

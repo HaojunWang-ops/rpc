@@ -1,0 +1,17 @@
+syntax = "proto3";
+
+package ghost;
+
+option cc_generic_services = true;
+
+message GhostRequest {
+  string name = 1;
+}
+
+message GhostResponse {
+  string result = 1;
+}
+
+service GhostService {
+  rpc GhostCall(GhostRequest) returns (GhostResponse);
+}

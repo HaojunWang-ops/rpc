@@ -51,7 +51,12 @@ private:
 
     void erasePending(uint64_t request_id);
     std::shared_ptr<PendingCall> erasePendingAndGet(uint64_t request_id);
-    void finishCall(const std::shared_ptr<PendingCall>& call, const std::string& error);
+
+    void finishEarlyError(google::protobuf::RpcController* controller,
+                          google::protobuf::Closure* done,
+                          const std::string& error);
+    void finishCall(const std::shared_ptr<PendingCall>& call);
+    void finishCallWithError(const std::shared_ptr<PendingCall>& call, const std::string& error);
 
     void closeSocket();
 private:
