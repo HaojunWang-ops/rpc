@@ -106,7 +106,7 @@ void TestRegisterEmptyName(demo::UserService_Stub& stub)
 
 int main()
 {
-    RpcChannel channel("127.0.0.1", 8000);
+    MyRpcChannel channel("127.0.0.1", 8000);
     channel.start();
     demo::UserService_Stub stub(&channel);
 

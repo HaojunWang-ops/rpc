@@ -24,7 +24,7 @@ struct AsyncState
 
 TEST (NotConnectionTest, RpcChannelNotStartAndPendingCallShouldeBeDone)
 {
-    RpcChannel channel("127.0.0.1", 8000);
+    MyRpcChannel channel("127.0.0.1", 8000);
     // no channel.start()
 
     demo::UserService_Stub stub(&channel);

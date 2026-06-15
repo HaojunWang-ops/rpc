@@ -4,6 +4,7 @@
 #include "rpc_controller.h"
 #include "rpc_channel.h"
 #include "Logging.h"
+#include "rpc_channel_pool.h"
 
 #include <google/protobuf/stubs/common.h>
 #include <iostream>
@@ -12,7 +13,7 @@
 #include <mutex>
 #include <condition_variable>
 
-void batch_async(RpcChannel* channel, demo::UserService_Stub& stub) 
+void batch_async(demo::UserService_Stub& stub) 
 {
     const int kRequestCount = 100;
     auto completed = std::make_shared<std::atomic<int>>(0);
@@ -70,11 +71,11 @@ void batch_async(RpcChannel* channel, demo::UserService_Stub& stub)
 
 int main()
 {
-    RpcChannel channel("127.0.0.1", 8000);
-    channel.start();
-    demo::UserService_Stub stub(&channel);
+    RpcChannelPool pool("127.0.0.1", 8000, 1);
+    pool.start();
+    demo::UserService_Stub stub(&pool);
 
-    batch_async(&channel, stub);
+    batch_async(stub);
 
     return 0;
 }

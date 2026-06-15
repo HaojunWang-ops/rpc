@@ -34,53 +34,145 @@ namespace
     static RpcSignalInitializer s_initializer;
 }
 
-RpcChannel::RpcChannel(const std::string ip, uint16_t port)
+MyRpcChannel::MyRpcChannel(const std::string ip, uint16_t port)
     : ip_(ip), port_(port)
 {
-    connected_ = false;
     running_ = false;
     sockfd_ = -1;
+    state_ = State::kStopped;
+    accepting_call_ = false;
 }
 
-RpcChannel::~RpcChannel()
+MyRpcChannel::~MyRpcChannel()
 {
-    running_.store(false, std::memory_order_release);
-
-    closeSocket();
-    handleConnectionLost("~RpcChannel()");
-
-    if (reader_thread_.joinable())
+    if (reader_thread_.joinable() && 
+        reader_thread_.get_id() == std::this_thread::get_id())
     {
-        reader_thread_.join();
+        LOG_ERROR << "~MyRpcChannel called in reader thread, this is unsafe";
+        std::terminate();
+    }
+
+    stop();
+}
+
+bool MyRpcChannel::isReaderThread() const
+{
+    return reader_thread_.joinable() && reader_thread_.get_id() == std::this_thread::get_id();
+}
+
+void MyRpcChannel::joinReaderIfNeeded()
+{
+    std::thread reader_to_join;
+
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+
+        if (reader_thread_.joinable() && reader_thread_.get_id() != std::this_thread::get_id())
+        {
+            reader_to_join = std::move(reader_thread_);
+        }
+    }
+
+    if (reader_to_join.joinable())
+    {
+        reader_to_join.join();
+    }
+}
+void MyRpcChannel::stop()
+{
+    std::unordered_map<uint64_t, std::shared_ptr<PendingCall>> pending;
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+
+        if (state_ == State::kStopped)
+        {
+        }
+        else
+        {
+            state_ = State::kStopping;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        accepting_call_ = false;
+        pending.swap(pending_);
+    }
+
+    running_.store(false);
+    closeSocket();
+
+    for (auto &[id, call] : pending)
+    {
+        finishCallWithError(call, "RpcChannel stopped");
+    }
+
+    if (!isReaderThread())
+    {
+        joinReaderIfNeeded();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        state_ = State::kStopped;
     }
 }
 
-bool RpcChannel::start()
+bool MyRpcChannel::start()
 {
-    if (running_.load(std::memory_order_acquire))
+    joinReaderIfNeeded();
+
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+
+    if (state_ == State::kRunning)
     {
-        setLastError("channel already started");
+        return true;
+    }
+
+    if (state_ == State::kStopping)
+    {
         return false;
     }
 
     if (!connect())
     {
+        state_ = State::kStopped;
         return false;
     }
 
-    running_.store(true, std::memory_order_release);
-    reader_thread_ = std::thread(&RpcChannel::readerInLoop, this);
+    running_.store(true);
+    reader_thread_ = std::thread(&MyRpcChannel::readerInLoop, this);
+
+    {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        accepting_call_ = true;
+        pending_.clear();
+    }
+
+    state_ = State::kRunning;
+
     return true;
 }
 
-bool RpcChannel::connect()
+bool MyRpcChannel::reconnect()
+{
+    stop();
+    return start();
+}
+
+bool MyRpcChannel::isAvailable()
+{
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    return state_ == State::kRunning;
+}
+
+bool MyRpcChannel::connect()
 {
     sockfd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd_ < 0)
     {
         setLastError("create socket failed");
         closeSocket();
-        connected_ = false;
         return false;
     }
 
@@ -91,7 +183,6 @@ bool RpcChannel::connect()
     {
         setLastError("inet_pton failed");
         closeSocket();
-        connected_ = false;
         return false;
     }
 
@@ -99,32 +190,18 @@ bool RpcChannel::connect()
     {
         setLastError("connect failed");
         closeSocket();
-        connected_ = false;
         return false;
     }
 
-    connected_ = true;
     return true;
 }
 
-bool RpcChannel::connected()
+void MyRpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
+                              google::protobuf::RpcController *controller,
+                              const google::protobuf::Message *request,
+                              google::protobuf::Message *response,
+                              google::protobuf::Closure *done)
 {
-    return connected_.load(std::memory_order_acquire);
-}
-
-void RpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
-                            google::protobuf::RpcController *controller,
-                            const google::protobuf::Message *request,
-                            google::protobuf::Message *response,
-                            google::protobuf::Closure *done)
-{
-    if (!running_.load(std::memory_order_acquire) || !connected_.load(std::memory_order_acquire))
-    {
-
-        finishEarlyError(controller, done, "channel not connected");
-        return;
-    }
-
     uint64_t request_id = next_request_id_.fetch_add(1);
     auto call = std::make_shared<PendingCall>();
     call->controller = controller;
@@ -166,14 +243,34 @@ void RpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
     send_buf.append(header_str);
     send_buf.append(args);
 
+    // 一定不能在锁里面执行回调
+    bool reject = false;
+    bool duplicate = false;
     {
         std::lock_guard<std::mutex> lock(pending_mutex_);
-        auto [it, inserted] = pending_.emplace(request_id, call);
-        if (!inserted)
+
+        if (!accepting_call_)
         {
-            finishEarlyError(controller, done, "duplicate request_id");
-            return;
+            reject = true;
         }
+        else
+        {
+            auto [it, inserted] = pending_.emplace(request_id, call);
+            if (!inserted)
+            {
+                duplicate = true;
+            }
+        }
+    }
+    if (reject)
+    {
+        finishEarlyError(controller, done, "RpcChannel is not accepting calls");
+        return;
+    }
+    if (duplicate)
+    {
+        finishEarlyError(controller, done, "duplicate request id");
+        return;
     }
 
     bool write_ok = false;
@@ -228,9 +325,9 @@ void RpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
     }
 }
 
-void RpcChannel::readerInLoop()
+void MyRpcChannel::readerInLoop()
 {
-    while (true)
+    while (running_.load(std::memory_order_acquire))
     {
         std::string frame;
         uint32_t net_total_size = 0;
@@ -281,27 +378,51 @@ void RpcChannel::readerInLoop()
     }
 }
 
-void RpcChannel::handleConnectionLost(const std::string &reason)
+void MyRpcChannel::handleConnectionLost(const std::string &reason)
 {
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        if (state_ == State::kRunning)
+        {
+            state_ = State::kStopping;
+        }
+        else if (state_ == State::kStopped || state_ == State::kStopping)
+        {
+            return;
+        }
+    }
+
     setLastError(reason);
 
     running_.store(false, std::memory_order_release);
-    connected_.store(false, std::memory_order_release);
 
     closeSocket();
 
     std::unordered_map<uint64_t, std::shared_ptr<PendingCall>> pending;
     {
         std::lock_guard<std::mutex> lock(pending_mutex_);
+        accepting_call_ = false;
         pending.swap(pending_);
     }
     for (auto &[id, call] : pending)
     {
         finishCallWithError(call, reason);
     }
+
+    if (isReaderThread())
+    {
+        return;
+    }
+
+    joinReaderIfNeeded();
+
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        state_ = State::kStopped;
+    }
 }
 
-void RpcChannel::handleResponseFrame(myrpc::RpcResponseHeader header, const std::string &body)
+void MyRpcChannel::handleResponseFrame(myrpc::RpcResponseHeader header, const std::string &body)
 {
     uint64_t request_id = header.request_id();
 
@@ -338,25 +459,25 @@ void RpcChannel::handleResponseFrame(myrpc::RpcResponseHeader header, const std:
 
     finishCall(call);
 }
-void RpcChannel::setLastError(const std::string &error)
+void MyRpcChannel::setLastError(const std::string &error)
 {
     std::lock_guard<std::mutex> lock(error_mutex_);
     last_error_ = error;
 }
 
-std::string RpcChannel::LastError()
+std::string MyRpcChannel::LastError()
 {
     std::lock_guard<std::mutex> lock(error_mutex_);
     return last_error_;
 }
 
-void RpcChannel::erasePending(uint64_t request_id)
+void MyRpcChannel::erasePending(uint64_t request_id)
 {
     std::lock_guard<std::mutex> lock(pending_mutex_);
     pending_.erase(request_id);
 }
 
-std::shared_ptr<PendingCall> RpcChannel::erasePendingAndGet(uint64_t request_id)
+std::shared_ptr<PendingCall> MyRpcChannel::erasePendingAndGet(uint64_t request_id)
 {
     std::lock_guard<std::mutex> lock(pending_mutex_);
 
@@ -373,9 +494,9 @@ std::shared_ptr<PendingCall> RpcChannel::erasePendingAndGet(uint64_t request_id)
     }
 }
 
-void RpcChannel::finishEarlyError(google::protobuf::RpcController* controller,
-                                  google::protobuf::Closure* done,
-                                  const std::string& error)
+void MyRpcChannel::finishEarlyError(google::protobuf::RpcController *controller,
+                                    google::protobuf::Closure *done,
+                                    const std::string &error)
 {
     if (controller)
     {
@@ -386,7 +507,7 @@ void RpcChannel::finishEarlyError(google::protobuf::RpcController* controller,
         done->Run();
     }
 }
-void RpcChannel::finishCall(const std::shared_ptr<PendingCall> &call)
+void MyRpcChannel::finishCall(const std::shared_ptr<PendingCall> &call)
 {
     if (!call)
     {
@@ -406,8 +527,8 @@ void RpcChannel::finishCall(const std::shared_ptr<PendingCall> &call)
     }
 }
 
-void RpcChannel::finishCallWithError(const std::shared_ptr<PendingCall> &call,
-                                     const std::string &error)
+void MyRpcChannel::finishCallWithError(const std::shared_ptr<PendingCall> &call,
+                                       const std::string &error)
 {
     if (!call)
     {
@@ -422,7 +543,7 @@ void RpcChannel::finishCallWithError(const std::shared_ptr<PendingCall> &call,
     finishCall(call);
 }
 
-void RpcChannel::closeSocket()
+void MyRpcChannel::closeSocket()
 {
     std::lock_guard<std::mutex> lock(close_mutex_);
 
@@ -436,7 +557,7 @@ void RpcChannel::closeSocket()
     }
 }
 
-bool RpcChannel::WriteN(const void *buf, size_t n)
+bool MyRpcChannel::WriteN(const void *buf, size_t n)
 {
     const char *p = reinterpret_cast<const char *>(buf);
     size_t left = n;
@@ -471,7 +592,7 @@ bool RpcChannel::WriteN(const void *buf, size_t n)
     return true;
 }
 
-bool RpcChannel::ReadN(void *buf, size_t n)
+bool MyRpcChannel::ReadN(void *buf, size_t n)
 {
     char *p = reinterpret_cast<char *>(buf);
     size_t left = n;

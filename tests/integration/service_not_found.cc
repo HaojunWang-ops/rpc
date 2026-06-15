@@ -21,7 +21,7 @@ struct AsyncState
 
 TEST(ServerErrorTest, ServiceNotFoundShouldCallDoneAndSetControllerFailed)
 {
-    RpcChannel channel("127.0.0.1", 8000);
+    MyRpcChannel channel("127.0.0.1", 8000);
     ASSERT_TRUE(channel.start());
 
     ghost::GhostService_Stub stub(&channel);

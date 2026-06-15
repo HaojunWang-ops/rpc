@@ -2,6 +2,7 @@
 #include "rpc_channel.h"
 #include "user.pb.h"
 #include "rpc_controller.h"
+#include "rpc_channel_pool.h"
 
 #include <google/protobuf/stubs/common.h>
 #include <iostream>
@@ -38,9 +39,10 @@ void TestLoginSuccess(demo::UserService_Stub& stub)
 
 int main()
 {
-    RpcChannel channel("127.0.0.1", 8000);
-    channel.start();
-    demo::UserService_Stub stub(&channel);
+
+    RpcChannelPool pool("127.0.0.1", 8000, 1);
+    pool.start();
+    demo::UserService_Stub stub(&pool);
 
     TestLoginSuccess(stub);
 

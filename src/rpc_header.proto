@@ -5,6 +5,8 @@ package myrpc;
 enum RpcErrorCode{
     RPC_OK = 0;
 
+    RPC_CHANNEL_POOL_NOT_READY = 10;
+
    RPC_SEND_FAILED = 100;
    RPC_CONNECTION_FAILED = 101;
     RPC_RECV_FAILED = 102;

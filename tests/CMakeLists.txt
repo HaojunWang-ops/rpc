@@ -1,5 +1,6 @@
 # tests/CMakeLists.txt
 
+## ====== target = test_protocol
 set(TEST_GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 file(MAKE_DIRECTORY ${TEST_GENERATED_DIR})
 
@@ -38,7 +39,29 @@ target_link_libraries(test_protocol PUBLIC
 
 myrpc_apply_sanitizers(test_protocol)
 
+# =========
 
+# ========= target = tcpserver
+
+set(TCPSERVER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/integration/tcpserver_for_test)
+
+add_library(tcpserver_core STATIC
+    ${TCPSERVER_DIR}/tcpserver.cc    
+)
+
+target_link_libraries(tcpserver_core
+    PUBLIC
+    myrpc_core
+    user_proto
+    Threads::Threads
+)
+
+target_include_directories(tcpserver_core PUBLIC
+    ${TCPSERVER_DIR}
+)
+
+myrpc_apply_sanitizers(tcpserver_core)
+# =========
 function(add_myrpc_test target_name source_file output_subdir)
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${source_file}")
         add_executable(${target_name}
@@ -63,6 +86,31 @@ function(add_myrpc_test target_name source_file output_subdir)
     endif()
 endfunction()
 
+function(add_gtest_test TARGET_NAME SOURCE_FILE OUTPUT_SUBDIR)
+    if (NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}")
+        return()
+    endif()
+
+    find_package(GTest REQUIRED)
+    add_executable(${TARGET_NAME} ${SOURCE_FILE})
+    target_link_libraries(${TARGET_NAME} PRIVATE
+        myrpc_core
+        user_proto
+        tcpserver_core
+        GTest::gtest_main
+    )
+    include(GoogleTest)
+    gtest_discover_tests(${TARGET_NAME})
+    set_target_properties(${TARGET_NAME} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_SUBDIR}"
+    )
+
+    myrpc_apply_sanitizers(${TARGET_NAME})
+endfunction()
+
+add_gtest_test(rpc_channel_pool_test1 unit/rpc_channel_pool_test1.cc unit)
+add_gtest_test(rpc_channel_pool_test2 unit/rpc_channel_pool_test2.cc unit)
+add_gtest_test(rpc_channel_pool_test3 unit/rpc_channel_pool_test3.cc unit)
 
 add_myrpc_test(bad_packet_test
     integration/bad_packet_test.cc
@@ -130,6 +178,8 @@ if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/service_not_found.cc)
     set_target_properties(service_not_found PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/integration"
     )
+
+    myrpc_apply_sanitizers(service_not_found)
 endif()
 
 if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/connection_lost.cc)
@@ -153,6 +203,8 @@ if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/connection_lost.cc)
     set_target_properties(connection_lost PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/integration"
     )
+
+    myrpc_apply_sanitizers(connection_lost)
 endif()
 
 if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/not_connection.cc)
@@ -175,4 +227,9 @@ if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/not_connection.cc)
     set_target_properties(not_connection PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/integration"
     )
+
+    myrpc_apply_sanitizers(not_connection)
 endif()
+
+
+add_gtest_test(rpc_channel_pool_test integration/rpc_channel_pool_test.cc integration)

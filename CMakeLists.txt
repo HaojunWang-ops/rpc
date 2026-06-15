@@ -172,6 +172,7 @@ add_library(myrpc_core STATIC
     src/rpc_provider.cc
     src/rpc_controller.cc
     src/ThreadPool.cc
+    src/rpc_channel_pool.cc
 )
 
 target_include_directories(myrpc_core PUBLIC

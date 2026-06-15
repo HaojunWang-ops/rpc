@@ -2,6 +2,7 @@
 #include "rpc_controller.h"
 #include "rpc_closure.h"
 #include "user.pb.h"
+#include "rpc_channel_pool.h"
 
 #include <gtest/gtest.h>
 #include <condition_variable>
@@ -41,9 +42,9 @@ TEST(ConnectionLostTest, AllPendingCallShouldFailedAndDoneShouldeBeCalled)
         ::close(listenfd);
     });
 
-    RpcChannel channel("127.0.0.1", 18000);
-    ASSERT_TRUE(channel.start());
-    demo::UserService_Stub stub(&channel);
+    RpcChannelPool pool("127.0.0.1", 18000, 4);
+    ASSERT_TRUE(pool.start());
+    demo::UserService_Stub stub(&pool);
 
     std::mutex mutex;
     std::condition_variable cv;
