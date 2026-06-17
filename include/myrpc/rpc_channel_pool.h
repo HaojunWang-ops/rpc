@@ -28,8 +28,10 @@ public:
                     google::protobuf::Message* response,
                     google::protobuf::Closure* done) override;
     std::shared_ptr<MyRpcChannel> pickChannel();
-private:
-    bool repairChannel(size_t index);
+
+    void repairDeadChannels();
+
+    size_t unavailableCount() const;
 private:
     std::string ip_;
     uint16_t port_;
@@ -43,6 +45,12 @@ private:
 
     std::shared_ptr<ChannelList> channels_snapshot_;
     std::atomic<size_t> next_{0};
+
+private:
+    bool repairChannel(size_t index);
+    bool repairChannelUnlocked(ChannelList& new_channels,
+                                size_t index,
+                                std::vector<std::shared_ptr<MyRpcChannel> >& channels_to_stop);
 };
 
 

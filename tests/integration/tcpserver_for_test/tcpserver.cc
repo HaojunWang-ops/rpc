@@ -9,7 +9,6 @@
 ControlledTcpServer::ControlledTcpServer(uint16_t port, ResponseBuilder builder)
     : port_(port), response_builder_(builder)
 {
-
 }
 
 ControlledTcpServer::~ControlledTcpServer()
@@ -28,7 +27,7 @@ bool ControlledTcpServer::start()
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ < 0)
     {
-        running_ = false;
+        running_.store(false, std::memory_order_release);
         return false;
     }
 
@@ -45,7 +44,7 @@ bool ControlledTcpServer::start()
     {
         ::close(listen_fd_);
         listen_fd_ = -1;
-        running_ = false;
+        running_.store(false, std::memory_order_release);
         return false;
     }
 
@@ -53,7 +52,7 @@ bool ControlledTcpServer::start()
     {
         ::close(listen_fd_);
         listen_fd_ = -1;
-        running_ = false;
+        running_.store(false, std::memory_order_release);
         return false;
     }
 
@@ -73,7 +72,11 @@ void ControlledTcpServer::stop()
     {
         ::shutdown(listen_fd_, SHUT_RDWR);
         ::close(listen_fd_);
-        listen_fd_ = -1;
+        listen_fd_.store(-1, std::memory_order_release);
+    }
+    if (accept_thread_.joinable())
+    {
+        accept_thread_.join();
     }
 
     {
@@ -101,11 +104,6 @@ void ControlledTcpServer::stop()
         {
             thread_to_join.join();
         }
-    }
-
-    if (accept_thread_.joinable())
-    {
-        accept_thread_.join();
     }
 }
 
@@ -192,8 +190,6 @@ bool ControlledTcpServer::waitForNewConnectionAfter(size_t old_accept_count,
 
 void ControlledTcpServer::closeConnection(size_t conn_id)
 {
-    int fd = -1;
-
     {
         std::lock_guard<std::mutex> lock(mutex_);
 
@@ -203,24 +199,23 @@ void ControlledTcpServer::closeConnection(size_t conn_id)
             return;
         }
 
-        fd = it->second.fd;
-    }
+        int fd = it->second.fd;
 
-    if (fd >= 0)
-    {
-        // fd 所有权仍然属于 connectionLoop。
-        // shutdown 足够让客户端 reader 感知连接断开。
-        ::shutdown(fd, SHUT_RDWR);
+        if (fd >= 0)
+        {
+            // fd 所有权仍然属于 connectionLoop。
+            // shutdown 足够让客户端 reader 感知连接断开。
+            ::shutdown(fd, SHUT_RDWR);
+        }
     }
 }
 
 void ControlledTcpServer::closeOneConnection()
 {
-    int fd = -1;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-
+        int fd = -1;
         for (auto &[id, conn] : conns_)
         {
             if (conn.fd >= 0)
@@ -229,11 +224,10 @@ void ControlledTcpServer::closeOneConnection()
                 break;
             }
         }
-    }
-
-    if (fd >= 0)
-    {
-        ::shutdown(fd, SHUT_RDWR);
+        if (fd >= 0)
+        {
+            ::shutdown(fd, SHUT_RDWR);
+        }
     }
 }
 
@@ -306,7 +300,7 @@ void ControlledTcpServer::acceptLoop()
         struct sockaddr_in peer{};
         socklen_t len = sizeof(peer);
 
-        int conn_fd = ::accept(listen_fd_, reinterpret_cast<sockaddr *>(&peer), &len);
+        int conn_fd = ::accept(listen_fd_.load(std::memory_order_acquire), reinterpret_cast<sockaddr *>(&peer), &len);
 
         if (conn_fd < 0)
         {
@@ -369,7 +363,7 @@ void ControlledTcpServer::connectLoop(size_t conn_id, int conn_fd)
         }
 
         uint32_t header_size = ::ntohl(net_header_size);
-        if (header_size != total_size - 4)
+        if (header_size > total_size - 4)
         {
             increaseBadFrame();
             break;

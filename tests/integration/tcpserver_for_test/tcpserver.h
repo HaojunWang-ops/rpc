@@ -9,7 +9,7 @@
 #include <mutex>
 #include <map>
 #include <vector>
-
+#include <atomic>
 #include "rpc_header.pb.h"
 
 class ControlledTcpServer
@@ -56,7 +56,7 @@ private:
 
     std::atomic<bool> running_{false};
 
-    int listen_fd_ = -1;
+    std::atomic<int> listen_fd_ {-1};
     std::thread accept_thread_;
 
     mutable std::mutex mutex_;

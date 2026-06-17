@@ -21,7 +21,8 @@ struct PendingCall
     bool finished = false;
 };
 
-class MyRpcChannel : public google::protobuf::RpcChannel
+class MyRpcChannel : public google::protobuf::RpcChannel, 
+                     public std::enable_shared_from_this<MyRpcChannel>
 {
 public:
     enum class State{
@@ -44,6 +45,9 @@ public:
                     google::protobuf::Message* response,
                     google::protobuf::Closure* done);
     
+    void setTimeoutMs(int timeout_ms);
+
+    int timeoutMs() const;
 private:
     bool ReadN(void* buf, size_t n);
     bool WriteN(const void* buf, size_t n);
@@ -67,21 +71,23 @@ private:
     void finishCall(const std::shared_ptr<PendingCall>& call);
     void finishCallWithError(const std::shared_ptr<PendingCall>& call, const std::string& error);
 
-    void closeSocket();
+    void closeSocketAfterIoStopped();
 
     void joinReaderIfNeeded();
     bool isReaderThread() const;
-    void markStopped();
+
+    void shutdownSocket();
+
+    void cleanupStoppedConnection();
+
+    void stopInternal();
 private:
     std::string ip_;
     uint16_t port_;
     
-    int sockfd_ = -1;
-    std::mutex close_mutex_;
+    std::atomic<int> sockfd_ {-1};
 
     std::atomic<uint64_t> next_request_id_{1};
-
-    std::mutex send_mutex_;
 
     std::mutex pending_mutex_;
     std::unordered_map<uint64_t, std::shared_ptr<PendingCall> > pending_;
@@ -97,9 +103,23 @@ private:
      std::string last_error_;
      std::mutex error_mutex_;
 
-     const int timeout_ms_ = 1000;
-     
-     std::thread reader_thread_;
+     //保护shutdown/close的互斥
+     std::mutex fd_mutex_;
+
+     std::mutex send_mutex_;
+
+     //保护reader_thread_ 的 move/join/get_id
+    std::thread reader_thread_;
+    mutable std::mutex reader_mutex_;
+    std::thread::id reader_thread_id_;
+
+     std::atomic<int> timeout_ms_ {3000};
+
+private:
+    std::unordered_map<uint64_t, std::shared_ptr<PendingCall>> markPendingFailed(const std::string& reason);
+
+    void failFromReaderThread(const std::string& reason);
+    void detachReaderHandleIfCurrentThread();
 };
 
 /*
@@ -108,4 +128,14 @@ private:
 3. reader 线程只做 handleConnectionLost，不负责销毁对象。
 4. reconnect 由 pool 触发。
 5. pool 析构前必须 stop 所有 channel。
+*/
+
+/*
+保护fd的ABA问题
+1. running_ = false，阻止新 I/O
+2. shutdown(fd)，唤醒正在阻塞的 read/write
+3. join reader，确认没有 reader 正在 read
+4. 拿 send_mutex_，确认没有 writer 正在 write
+5. close(fd)，释放 fd
+所以read/write是不可能和close并发的
 */

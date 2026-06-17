@@ -143,6 +143,76 @@ bool RpcChannelPool::repairChannel(size_t index)
     return true;
 }
 
+bool RpcChannelPool::repairChannelUnlocked(ChannelList& new_channels, size_t index, std::vector<std::shared_ptr<MyRpcChannel> >& channels_to_stop)
+{
+    auto& old_ch = new_channels[index];
+    
+    if (old_ch && old_ch->isAvailable())
+    {
+        return false;
+    }
+
+    auto new_ch = std::make_shared<MyRpcChannel>(ip_, port_);
+
+    if (!new_ch->start())
+    {
+        return false;
+    }
+
+    if (old_ch)
+    {
+        channels_to_stop.push_back(std::move(old_ch));
+    }
+
+    old_ch = std::move(new_ch);
+    return true;
+}
+
+void RpcChannelPool::repairDeadChannels()
+{
+    std::vector<std::shared_ptr<MyRpcChannel> > channels_to_stop;
+    {
+        std::lock_guard<std::mutex> lock(repair_mutex_);
+
+        auto old_snapshot = std::atomic_load_explicit(
+            &channels_snapshot_,
+            std::memory_order_acquire
+        );
+
+        if (!old_snapshot)
+        {
+            return;
+        }
+
+        auto new_snapshot = std::make_shared<ChannelList> (*old_snapshot);
+
+        bool changed = false;
+
+        for (size_t i = 0; i < (*new_snapshot).size(); i++)
+        {
+            changed |= repairChannelUnlocked(*new_snapshot,
+                                            i,
+                                            channels_to_stop);    
+        }
+
+        if (changed)
+        {
+            std::atomic_store_explicit(
+                &channels_snapshot_,
+                 new_snapshot,
+                std::memory_order_release
+            );
+        }
+    }
+
+    for (auto& ch : channels_to_stop)
+    {
+        if (ch)
+        {
+            ch->stop();
+        }
+    }
+}
 std::shared_ptr<MyRpcChannel> RpcChannelPool::pickChannel()
 {
     auto snapshot = std::atomic_load_explicit(
@@ -186,6 +256,30 @@ std::shared_ptr<MyRpcChannel> RpcChannelPool::pickChannel()
     return nullptr;
 }
 
+size_t RpcChannelPool::unavailableCount() const
+{
+    auto old_snaptshot = std::atomic_load_explicit(
+        &channels_snapshot_,
+        std::memory_order_acquire
+    );
+
+    if (!old_snaptshot)
+    {
+        return 0;
+    }
+
+    size_t count = 0;
+
+    for (const auto& ch : *old_snaptshot)
+    {
+        if (!ch || !ch->isAvailable())
+        {
+            count++;
+        }
+    }
+
+    return count;
+}
 void RpcChannelPool::CallMethod(const google::protobuf::MethodDescriptor *method,
                                 google::protobuf::RpcController *controller,
                                 const google::protobuf::Message *request,

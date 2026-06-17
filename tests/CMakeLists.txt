@@ -100,7 +100,9 @@ function(add_gtest_test TARGET_NAME SOURCE_FILE OUTPUT_SUBDIR)
         GTest::gtest_main
     )
     include(GoogleTest)
-    gtest_discover_tests(${TARGET_NAME})
+    gtest_discover_tests(${TARGET_NAME}
+        DISCOVERY_MODE PRE_TEST
+    )
     set_target_properties(${TARGET_NAME} PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${OUTPUT_SUBDIR}"
     )
@@ -108,9 +110,8 @@ function(add_gtest_test TARGET_NAME SOURCE_FILE OUTPUT_SUBDIR)
     myrpc_apply_sanitizers(${TARGET_NAME})
 endfunction()
 
-add_gtest_test(rpc_channel_pool_test1 unit/rpc_channel_pool_test1.cc unit)
-add_gtest_test(rpc_channel_pool_test2 unit/rpc_channel_pool_test2.cc unit)
-add_gtest_test(rpc_channel_pool_test3 unit/rpc_channel_pool_test3.cc unit)
+add_gtest_test(rpc_channel_pool_test unit/rpc_channel_pool_test.cc unit)
+
 
 add_myrpc_test(bad_packet_test
     integration/bad_packet_test.cc
@@ -173,7 +174,9 @@ if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/service_not_found.cc)
     )
 
     include(GoogleTest)
-    gtest_discover_tests(service_not_found)
+    gtest_discover_tests(service_not_found 
+            DISCOVERY_MODE PRE_TEST
+    )
 
     set_target_properties(service_not_found PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/integration"
@@ -198,7 +201,9 @@ if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/connection_lost.cc)
     )
 
     include(GoogleTest)
-    gtest_discover_tests(connection_lost)
+    gtest_discover_tests(connection_lost
+    DISCOVERY_MODE PRE_TEST
+    )
 
     set_target_properties(connection_lost PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/integration"
@@ -222,7 +227,10 @@ if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/integration/not_connection.cc)
     )
 
     include(GoogleTest)
-    gtest_discover_tests(not_connection)
+
+    gtest_discover_tests(not_connection
+            DISCOVERY_MODE PRE_TEST
+    )
 
     set_target_properties(not_connection PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/integration"

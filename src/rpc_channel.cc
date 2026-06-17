@@ -37,27 +37,37 @@ namespace
 MyRpcChannel::MyRpcChannel(const std::string ip, uint16_t port)
     : ip_(ip), port_(port)
 {
-    running_ = false;
-    sockfd_ = -1;
+    running_.store(false, std::memory_order_release);
+    sockfd_.store(-1, std::memory_order_release);
     state_ = State::kStopped;
     accepting_call_ = false;
 }
 
 MyRpcChannel::~MyRpcChannel()
 {
-    if (reader_thread_.joinable() && 
-        reader_thread_.get_id() == std::this_thread::get_id())
+    if (isReaderThread())
     {
         LOG_ERROR << "~MyRpcChannel called in reader thread, this is unsafe";
         std::terminate();
     }
 
-    stop();
+    stopInternal();
+}
+
+void MyRpcChannel::setTimeoutMs(int timeout_ms)
+{
+    timeout_ms_.store(timeout_ms, std::memory_order_release);
+}
+
+int MyRpcChannel::timeoutMs() const
+{
+    return timeout_ms_.load(std::memory_order_acquire);
 }
 
 bool MyRpcChannel::isReaderThread() const
 {
-    return reader_thread_.joinable() && reader_thread_.get_id() == std::this_thread::get_id();
+    std::lock_guard<std::mutex> lock(reader_mutex_);
+    return reader_thread_.joinable() && reader_thread_id_ == std::this_thread::get_id();
 }
 
 void MyRpcChannel::joinReaderIfNeeded()
@@ -65,11 +75,12 @@ void MyRpcChannel::joinReaderIfNeeded()
     std::thread reader_to_join;
 
     {
-        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        std::lock_guard<std::mutex> lock(reader_mutex_);
 
-        if (reader_thread_.joinable() && reader_thread_.get_id() != std::this_thread::get_id())
+        if (reader_thread_.joinable() && reader_thread_id_ != std::this_thread::get_id())
         {
             reader_to_join = std::move(reader_thread_);
+            reader_thread_id_ = std::thread::id{};
         }
     }
 
@@ -78,46 +89,90 @@ void MyRpcChannel::joinReaderIfNeeded()
         reader_to_join.join();
     }
 }
+
+void MyRpcChannel::shutdownSocket()
+{
+    std::lock_guard<std::mutex> lock(fd_mutex_);
+
+    int fd = sockfd_.load(std::memory_order_acquire);
+
+    if (fd >= 0)
+    {
+        ::shutdown(fd, SHUT_RDWR);
+    }
+}
+
 void MyRpcChannel::stop()
 {
-    std::unordered_map<uint64_t, std::shared_ptr<PendingCall>> pending;
+    std::shared_ptr<MyRpcChannel> self = shared_from_this();
+
+    auto pending = markPendingFailed("stop() is called");
+
+    bool need_to_fail = false;
     {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-
+        if (state_ == State::kRunning)
+        {
+            need_to_fail = true;       
+        }
         if (state_ == State::kStopped)
         {
-        }
-        else
-        {
-            state_ = State::kStopping;
+            return;
         }
     }
 
+    if (need_to_fail)
     {
-        std::lock_guard<std::mutex> lock(pending_mutex_);
-        accepting_call_ = false;
-        pending.swap(pending_);
+        markPendingFailed("stop() is called");
     }
 
-    running_.store(false);
-    closeSocket();
-
-    for (auto &[id, call] : pending)
-    {
-        finishCallWithError(call, "RpcChannel stopped");
-    }
-
-    if (!isReaderThread())
-    {
-        joinReaderIfNeeded();
-    }
+    cleanupStoppedConnection();
 
     {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
         state_ = State::kStopped;
     }
+
+    for (auto& [id, call] : pending)
+    {
+        finishCallWithError(call, "stop() is called");
+    }
 }
 
+void MyRpcChannel::stopInternal()
+{   
+    auto pending = markPendingFailed("stopInternal() is called");
+
+    bool need_to_fail = false;
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        if (state_ == State::kRunning)
+        {
+            need_to_fail = true;       
+        }
+        if (state_ == State::kStopped)
+        {
+            return;
+        }
+    }
+
+    if (need_to_fail)
+    {
+        markPendingFailed("stop() is called");
+    }
+
+    cleanupStoppedConnection();
+
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        state_ = State::kStopped;
+    } 
+
+    for (auto& [id, call] : pending)
+    {
+        finishCallWithError(call, "stopInternal() is called");
+    }
+}
 bool MyRpcChannel::start()
 {
     joinReaderIfNeeded();
@@ -140,8 +195,16 @@ bool MyRpcChannel::start()
         return false;
     }
 
-    running_.store(true);
-    reader_thread_ = std::thread(&MyRpcChannel::readerInLoop, this);
+    running_.store(true, std::memory_order_release);
+    
+    {
+        std::lock_guard<std::mutex> lock(reader_mutex_);
+        auto self = shared_from_this();
+        reader_thread_ = std::thread([self](){
+            self->readerInLoop();
+        });
+        reader_thread_id_ = reader_thread_.get_id();
+    }
 
     {
         std::lock_guard<std::mutex> lock(pending_mutex_);
@@ -168,13 +231,15 @@ bool MyRpcChannel::isAvailable()
 
 bool MyRpcChannel::connect()
 {
-    sockfd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd_ < 0)
+    int fd= ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
     {
         setLastError("create socket failed");
-        closeSocket();
+        closeSocketAfterIoStopped();
         return false;
     }
+
+    sockfd_.store(fd, std::memory_order_release);
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -182,14 +247,14 @@ bool MyRpcChannel::connect()
     if (::inet_pton(AF_INET, ip_.c_str(), &(addr.sin_addr)) <= 0)
     {
         setLastError("inet_pton failed");
-        closeSocket();
+        closeSocketAfterIoStopped();
         return false;
     }
 
-    if (::connect(sockfd_, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
+    if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
     {
         setLastError("connect failed");
-        closeSocket();
+        closeSocketAfterIoStopped();
         return false;
     }
 
@@ -281,14 +346,14 @@ void MyRpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
 
     if (!write_ok)
     {
-        auto failed_call = erasePendingAndGet(request_id);
-        if (failed_call)
-        {
-            finishCallWithError(failed_call, "send rpc request failed");
-        }
+        auto self = shared_from_this();
 
-        handleConnectionLost("send rpc request failed");
-        return;
+        auto pending = markPendingFailed("send rpc error");
+
+        for (auto [id, call] : pending)
+        {
+            finishCallWithError(call, "send rpc error");
+        }
     }
 
     if (done == nullptr)
@@ -297,7 +362,7 @@ void MyRpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
         {
             std::unique_lock<std::mutex> lock(call->mutex);
             ok = call->cv.wait_for(lock,
-                                   std::chrono::milliseconds(timeout_ms_),
+                                   std::chrono::milliseconds(timeout_ms_.load(std::memory_order_acquire)),
                                    [&call]()
                                    { return call->finished; });
         }
@@ -334,7 +399,7 @@ void MyRpcChannel::readerInLoop()
         uint32_t net_header_size = 0;
         if (!ReadN(&net_total_size, sizeof(net_total_size)) || !ReadN(&net_header_size, sizeof(net_header_size)))
         {
-            handleConnectionLost("ReadN header_size or total_size failed");
+            failFromReaderThread("ReadN header_size or total_size failed");
             return;
         }
 
@@ -343,82 +408,38 @@ void MyRpcChannel::readerInLoop()
 
         if (total_size < 4 || header_size > total_size - 4)
         {
-            handleConnectionLost("incorrect response frame");
+            failFromReaderThread("incorrect response frame");
             return;
         }
 
         std::string header_str(header_size, '\0');
         if (!ReadN(header_str.data(), header_size))
         {
-            handleConnectionLost("ReadN header_str failed");
+            failFromReaderThread("ReadN header_str failed");
             return;
         }
 
         myrpc::RpcResponseHeader header;
         if (!header.ParseFromString(header_str))
         {
-            handleConnectionLost("header parse from string failed");
+           failFromReaderThread("header parse from string failed");
             return;
         }
 
         if (total_size != 4 + header_size + header.response_size())
         {
-            handleConnectionLost("incorrect response frame");
+            failFromReaderThread("incorrect response frame");
             return;
         }
 
         std::string args(header.response_size(), '\0');
         if (!ReadN(args.data(), header.response_size()))
         {
-            handleConnectionLost("ReadN header_str failed");
+            failFromReaderThread("ReadN header_str failed");
             return;
         }
 
         handleResponseFrame(header, args);
-    }
-}
-
-void MyRpcChannel::handleConnectionLost(const std::string &reason)
-{
-    {
-        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-        if (state_ == State::kRunning)
-        {
-            state_ = State::kStopping;
-        }
-        else if (state_ == State::kStopped || state_ == State::kStopping)
-        {
-            return;
-        }
-    }
-
-    setLastError(reason);
-
-    running_.store(false, std::memory_order_release);
-
-    closeSocket();
-
-    std::unordered_map<uint64_t, std::shared_ptr<PendingCall>> pending;
-    {
-        std::lock_guard<std::mutex> lock(pending_mutex_);
-        accepting_call_ = false;
-        pending.swap(pending_);
-    }
-    for (auto &[id, call] : pending)
-    {
-        finishCallWithError(call, reason);
-    }
-
-    if (isReaderThread())
-    {
-        return;
-    }
-
-    joinReaderIfNeeded();
-
-    {
-        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-        state_ = State::kStopped;
     }
 }
 
@@ -428,7 +449,7 @@ void MyRpcChannel::handleResponseFrame(myrpc::RpcResponseHeader header, const st
 
     if (request_id == 0)
     {
-        handleConnectionLost("invalid request id = 0");
+        markPendingFailed("invalid request id = 0");
         return;
     }
 
@@ -459,6 +480,7 @@ void MyRpcChannel::handleResponseFrame(myrpc::RpcResponseHeader header, const st
 
     finishCall(call);
 }
+
 void MyRpcChannel::setLastError(const std::string &error)
 {
     std::lock_guard<std::mutex> lock(error_mutex_);
@@ -543,16 +565,14 @@ void MyRpcChannel::finishCallWithError(const std::shared_ptr<PendingCall> &call,
     finishCall(call);
 }
 
-void MyRpcChannel::closeSocket()
+void MyRpcChannel::closeSocketAfterIoStopped()
 {
-    std::lock_guard<std::mutex> lock(close_mutex_);
+    std::lock_guard<std::mutex> lock(fd_mutex_);
 
-    int fd = sockfd_;
-    sockfd_ = -1;
+    int fd = sockfd_.exchange(-1, std::memory_order_acq_rel);
 
     if (fd >= 0)
     {
-        ::shutdown(fd, SHUT_RDWR);
         ::close(fd);
     }
 }
@@ -569,7 +589,14 @@ bool MyRpcChannel::WriteN(const void *buf, size_t n)
             return false;
         }
 
-        ssize_t nw = ::write(sockfd_, p, left);
+        int fd = sockfd_.load(std::memory_order_acquire);
+        if (fd < 0)
+        {
+            errno = ECANCELED;
+            return false;
+        }
+
+        ssize_t nw = ::write(fd, p ,left);
         if (nw > 0)
         {
             p += nw;
@@ -604,7 +631,14 @@ bool MyRpcChannel::ReadN(void *buf, size_t n)
             return false;
         }
 
-        ssize_t nr = ::read(sockfd_, p, left);
+        int fd = sockfd_.load(std::memory_order_acquire);
+        if (fd < 0)
+        {
+            errno = ECANCELED;
+            return false;
+        }
+        ssize_t nr = ::read(fd, p, left);
+        
         if (nr > 0)
         {
             p += nr;
@@ -622,4 +656,77 @@ bool MyRpcChannel::ReadN(void *buf, size_t n)
         }
     }
     return true;
+}
+
+std::unordered_map<uint64_t, std::shared_ptr<PendingCall> > MyRpcChannel::markPendingFailed(const std::string& reason)
+{
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+
+        if (state_ == State::kRunning)
+        {
+            state_ = State::kStopping;
+        }
+        else
+        {
+            return {};
+        }
+    }
+
+    setLastError(reason);
+
+    running_.store(false, std::memory_order_release);
+
+    shutdownSocket();
+
+    std::unordered_map<uint64_t, std::shared_ptr<PendingCall> > pending;
+    {
+        std::lock_guard<std::mutex> lock(pending_mutex_);
+        pending.swap(pending_);
+        accepting_call_ = false;
+    }
+
+    return pending;
+}
+
+void MyRpcChannel::cleanupStoppedConnection()
+{
+    if (isReaderThread())
+    {
+        LOG_ERROR << "cleanupStoppedConnection is called int reader thread";
+        return;
+    }
+
+    joinReaderIfNeeded();
+
+    {
+        std::lock_guard<std::mutex> lock(send_mutex_);
+        closeSocketAfterIoStopped();
+    }
+
+}
+
+void MyRpcChannel::failFromReaderThread(const std::string& reason)
+{
+    auto self = shared_from_this();
+
+    auto pending = markPendingFailed(reason);
+
+    detachReaderHandleIfCurrentThread();
+
+    for (auto& [id, call] : pending)
+    {
+        finishCallWithError(call, reason);
+    }
+}
+
+void MyRpcChannel::detachReaderHandleIfCurrentThread()
+{
+    std::lock_guard<std::mutex> lock(reader_mutex_);
+    
+    if (reader_thread_.joinable() && reader_thread_id_ == std::this_thread::get_id())
+    {
+        reader_thread_.detach();
+        reader_thread_id_ = std::thread::id{};
+    }
 }
