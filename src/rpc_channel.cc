@@ -4,6 +4,7 @@
 #include "rpc_header.pb.h"
 #include "rpc_controller.h"
 #include "Logging.h"
+#include "CountDownLatch.h"
 
 #include <arpa/inet.h>
 #include <google/protobuf/descriptor.h>
@@ -108,24 +109,6 @@ void MyRpcChannel::stop()
 
     auto pending = markPendingFailed("stop() is called");
 
-    bool need_to_fail = false;
-    {
-        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-        if (state_ == State::kRunning)
-        {
-            need_to_fail = true;       
-        }
-        if (state_ == State::kStopped)
-        {
-            return;
-        }
-    }
-
-    if (need_to_fail)
-    {
-        markPendingFailed("stop() is called");
-    }
-
     cleanupStoppedConnection();
 
     {
@@ -142,24 +125,6 @@ void MyRpcChannel::stop()
 void MyRpcChannel::stopInternal()
 {   
     auto pending = markPendingFailed("stopInternal() is called");
-
-    bool need_to_fail = false;
-    {
-        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-        if (state_ == State::kRunning)
-        {
-            need_to_fail = true;       
-        }
-        if (state_ == State::kStopped)
-        {
-            return;
-        }
-    }
-
-    if (need_to_fail)
-    {
-        markPendingFailed("stop() is called");
-    }
 
     cleanupStoppedConnection();
 
@@ -197,12 +162,18 @@ bool MyRpcChannel::start()
 
     running_.store(true, std::memory_order_release);
     
+    auto self = shared_from_this();
+
+    auto start_latch = std::make_shared<reactor::CountDownLatch>(1);
+
+    std::thread new_reader([self, start_latch](){
+        start_latch->wait();
+        self->readerInLoop();
+    });
+
     {
-        std::lock_guard<std::mutex> lock(reader_mutex_);
-        auto self = shared_from_this();
-        reader_thread_ = std::thread([self](){
-            self->readerInLoop();
-        });
+        std::lock_guard<std::mutex> lock(reader_mutex_); 
+        reader_thread_ = std::move(new_reader);
         reader_thread_id_ = reader_thread_.get_id();
     }
 
@@ -214,6 +185,7 @@ bool MyRpcChannel::start()
 
     state_ = State::kRunning;
 
+    start_latch->countDown();
     return true;
 }
 
@@ -267,6 +239,8 @@ void MyRpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
                               google::protobuf::Message *response,
                               google::protobuf::Closure *done)
 {
+    auto self = shared_from_this();
+
     uint64_t request_id = next_request_id_.fetch_add(1);
     auto call = std::make_shared<PendingCall>();
     call->controller = controller;
@@ -346,8 +320,6 @@ void MyRpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
 
     if (!write_ok)
     {
-        auto self = shared_from_this();
-
         auto pending = markPendingFailed("send rpc error");
 
         for (auto [id, call] : pending)
@@ -449,7 +421,7 @@ void MyRpcChannel::handleResponseFrame(myrpc::RpcResponseHeader header, const st
 
     if (request_id == 0)
     {
-        markPendingFailed("invalid request id = 0");
+        failFromReaderThread("invalid request id = 0");
         return;
     }
 

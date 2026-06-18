@@ -6,6 +6,25 @@
 #include <netinet/in.h>
 #include <cerrno>
 #include <atomic>
+#include <signal.h>
+
+namespace
+{
+    class RpcSignalInitializer
+    {
+    public:
+        RpcSignalInitializer()
+        {
+            struct sigaction sa;
+            sa.sa_handler = SIG_IGN;
+            sigemptyset(&sa.sa_mask);
+            sa.sa_flags = 0;
+            ::sigaction(SIGPIPE, &sa, nullptr);
+        }
+    };
+    static RpcSignalInitializer s_initializer;
+}
+
 ControlledTcpServer::ControlledTcpServer(uint16_t port, ResponseBuilder builder)
     : port_(port), response_builder_(builder)
 {
