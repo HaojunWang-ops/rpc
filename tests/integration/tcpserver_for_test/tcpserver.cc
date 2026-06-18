@@ -75,6 +75,13 @@ bool ControlledTcpServer::start()
         return false;
     }
 
+    sockaddr_in bound_addr{};
+    socklen_t bound_len = sizeof(bound_addr);
+    if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&bound_addr), &bound_len) == 0)
+    {
+        port_ = ::ntohs(bound_addr.sin_port);
+    }
+
     accept_thread_ = std::thread(&ControlledTcpServer::acceptLoop, this);
     return true;
 }
@@ -124,6 +131,11 @@ void ControlledTcpServer::stop()
             thread_to_join.join();
         }
     }
+}
+
+uint16_t ControlledTcpServer::port() const
+{
+    return port_;
 }
 
 size_t ControlledTcpServer::acceptCount() const
@@ -190,6 +202,11 @@ bool ControlledTcpServer::waitForActiveConnections(size_t n, std::chrono::millis
     std::unique_lock<std::mutex> lock(mutex_);
     return cv_.wait_for(lock, timeout, [&]
                         { return active_count_ == n; });
+}
+
+bool ControlledTcpServer::waitForActiveCount(size_t n, std::chrono::milliseconds timeout)
+{
+    return waitForActiveConnections(n, timeout);
 }
 
 bool ControlledTcpServer::waitForTotalRequests(size_t n, std::chrono::milliseconds timeout)

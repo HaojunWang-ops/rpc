@@ -1,45 +1,55 @@
-#include "common.h"
 #include "rpc_header.pb.h"
+#include "tcpserver.h"
 
 #include <arpa/inet.h>
+#include <gtest/gtest.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <cerrno>
+#include <chrono>
 #include <cstring>
-#include <iostream>
+#include <functional>
 #include <string>
+#include <thread>
 
-void getResponse(int fd);
+namespace
+{
+std::string emptyResponse(const myrpc::RpcHeader&, const std::string&)
+{
+    return {};
+}
 
-int Connect()
+bool waitUntil(std::chrono::milliseconds timeout, const std::function<bool()>& pred)
+{
+    auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        if (pred())
+        {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return pred();
+}
+
+int connectTo(uint16_t port)
 {
     int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
     {
-        perror("socket");
         return -1;
     }
 
-    timeval tv{};
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
-    ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = ::htons(8000);
+    addr.sin_port = ::htons(port);
+    addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
 
-    if (::inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) <= 0)
+    if (::connect(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0)
     {
-        perror("inet_pton");
-        ::close(fd);
-        return -1;
-    }
-
-    if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
-    {
-        perror("connect");
         ::close(fd);
         return -1;
     }
@@ -47,149 +57,95 @@ int Connect()
     return fd;
 }
 
-void SendTotalSizeLessThan4()
+bool writeAll(int fd, const void* data, size_t size)
 {
-    int fd = Connect();
-    if (fd < 0)
-        return;
+    const char* p = static_cast<const char*>(data);
+    size_t left = size;
+    while (left > 0)
+    {
+        ssize_t n = ::write(fd, p, left);
+        if (n > 0)
+        {
+            p += n;
+            left -= static_cast<size_t>(n);
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+}
+
+TEST(BadPacketTest, TotalSizeLessThanHeaderSizeFieldShouldBeRejected)
+{
+    ControlledTcpServer server(0, emptyResponse);
+    ASSERT_TRUE(server.start());
+
+    int fd = connectTo(server.port());
+    ASSERT_GE(fd, 0);
 
     uint32_t total_size = ::htonl(3);
-    WriteN(fd, &total_size, sizeof(total_size));
+    ASSERT_TRUE(writeAll(fd, &total_size, sizeof(total_size)));
 
-    getResponse(fd);
-    std::cout << "sent bad packet: total_size < 4\n";
+    EXPECT_TRUE(waitUntil(std::chrono::seconds(1), [&] {
+        return server.badFrameCount() == 1;
+    }));
+
     ::close(fd);
+    server.stop();
 }
 
-void SendHeaderSizeGreaterThanBody()
+TEST(BadPacketTest, HeaderSizeGreaterThanBodyShouldBeRejected)
 {
-    int fd = Connect();
-    if (fd < 0)
-        return;
+    ControlledTcpServer server(0, emptyResponse);
+    ASSERT_TRUE(server.start());
 
-    uint32_t total_size = ::htonl(4);    // body_size = total_size - 4 = 0
-    uint32_t header_size = ::htonl(100); // header_size > body_size
+    int fd = connectTo(server.port());
+    ASSERT_GE(fd, 0);
 
-    WriteN(fd, &total_size, sizeof(total_size));
-    WriteN(fd, &header_size, sizeof(header_size));
+    uint32_t total_size = ::htonl(4);
+    uint32_t header_size = ::htonl(100);
+    ASSERT_TRUE(writeAll(fd, &total_size, sizeof(total_size)));
+    ASSERT_TRUE(writeAll(fd, &header_size, sizeof(header_size)));
 
-    getResponse(fd);
-    std::cout << "sent bad packet: header_size > body_size\n";
+    EXPECT_TRUE(waitUntil(std::chrono::seconds(1), [&] {
+        return server.badFrameCount() == 1;
+    }));
+
     ::close(fd);
+    server.stop();
 }
 
-void SendIncompletePacket()
+TEST(BadPacketTest, ArgsSizeMismatchShouldBeRejected)
 {
-    int fd = Connect();
-    if (fd < 0)
-        return;
+    ControlledTcpServer server(0, emptyResponse);
+    ASSERT_TRUE(server.start());
 
-    uint32_t total_size = ::htonl(100);
-    WriteN(fd, &total_size, sizeof(total_size));
+    int fd = connectTo(server.port());
+    ASSERT_GE(fd, 0);
 
-    getResponse(fd);
-    std::cout << "sent incomplete packet\n";
+    myrpc::RpcHeader header;
+    header.set_request_id(1);
+    header.set_service_name("demo.UserService");
+    header.set_method_name("Login");
+    header.set_args_size(100);
+
+    std::string header_str = header.SerializeAsString();
+    uint32_t total_size = ::htonl(static_cast<uint32_t>(4 + header_str.size()));
+    uint32_t header_size = ::htonl(static_cast<uint32_t>(header_str.size()));
+
+    ASSERT_TRUE(writeAll(fd, &total_size, sizeof(total_size)));
+    ASSERT_TRUE(writeAll(fd, &header_size, sizeof(header_size)));
+    ASSERT_TRUE(writeAll(fd, header_str.data(), header_str.size()));
+
+    EXPECT_TRUE(waitUntil(std::chrono::seconds(1), [&] {
+        return server.badFrameCount() == 1;
+    }));
+
     ::close(fd);
-}
-
-void getResponse(int fd)
-{
-    // ---------- 调试：开始 getResponse ----------
-    std::cerr << "[getResponse] fd=" << fd << " start" << std::endl;
-
-    // --- ReadN 1: 读取 total_size ---
-    std::cerr << "[getResponse] ReadN 1: trying to read total_size (4 bytes)" << std::endl;
-    uint32_t net_total_size = 0;
-    if (!ReadN(fd, &net_total_size, sizeof(net_total_size)))
-    {
-        std::cerr << "[getResponse] ReadN 1 FAILED: read total_size failed" << std::endl;
-        return;
-    }
-    std::cerr << "[getResponse] ReadN 1 OK: net_total_size=0x" << std::hex << net_total_size << std::dec << std::endl;
-
-    uint32_t total_size = ::ntohl(net_total_size);
-    if (total_size < 4)
-    {
-        std::cerr << "[getResponse] total_size < 4 (" << total_size << ")" << std::endl;
-        return;
-    }
-
-    // --- ReadN 2: 读取 header_size ---
-    std::cerr << "[getResponse] ReadN 2: trying to read header_size (4 bytes)" << std::endl;
-    uint32_t net_header_size = 0;
-    if (!ReadN(fd, &net_header_size, sizeof(net_header_size)))
-    {
-        std::cerr << "[getResponse] ReadN 2 FAILED: read header_size failed" << std::endl;
-        return;
-    }
-    std::cerr << "[getResponse] ReadN 2 OK: net_header_size=0x" << std::hex << net_header_size << std::dec << std::endl;
-
-    uint32_t header_size = ::ntohl(net_header_size);
-    uint32_t body_size = total_size - 4;
-    if (header_size > body_size)
-    {
-        std::cerr << "[getResponse] header_size > body_size (" << header_size << " > " << body_size << ")" << std::endl;
-        return;
-    }
-
-    // --- ReadN 3: 读取 header 内容 ---
-    std::cerr << "[getResponse] ReadN 3: trying to read header_str (" << header_size << " bytes)" << std::endl;
-    std::string response_header_str(header_size, '\0');
-    if (!ReadN(fd, response_header_str.data(), header_size))
-    {
-        std::cerr << "[getResponse] ReadN 3 FAILED: read response header failed" << std::endl;
-        return;
-    }
-    std::cerr << "[getResponse] ReadN 3 OK" << std::endl;
-
-    myrpc::RpcResponseHeader response_header;
-    if (!response_header.ParseFromString(response_header_str))
-    {
-        std::cerr << "[getResponse] parse response header failed" << std::endl;
-        return;
-    }
-
-    if (response_header.error_code() != 0)
-    {
-        std::cerr << "[getResponse] server error: " << response_header.error_text() << std::endl;
-        return;
-    }
-
-    uint32_t response_size = response_header.response_size();
-    uint32_t real_size = body_size - header_size;
-    if (real_size != response_size)
-    {
-        std::cerr << "[getResponse] size mismatch: real=" << real_size << " header says=" << response_size << std::endl;
-        return;
-    }
-
-    // --- ReadN 4: 读取 response body ---
-    std::cerr << "[getResponse] ReadN 4: trying to read response body (" << response_size << " bytes)" << std::endl;
-    std::string response_str(response_size, '\0');
-    if (!ReadN(fd, response_str.data(), response_size))
-    {
-        std::cerr << "[getResponse] ReadN 4 FAILED: read response body failed" << std::endl;
-        return;
-    }
-    std::cerr << "[getResponse] ReadN 4 OK" << std::endl;
-
-    // 注意：下面的代码存在未初始化的指针问题，仅作调试占位
-    google::protobuf::Message* response = nullptr;  // 原代码未初始化，这里临时设为 nullptr
-    if (response == nullptr || !response->ParseFromString(response_str))
-    {
-        std::cerr << "[getResponse] parse to response failed (response object not ready)" << std::endl;
-        return;
-    }
-
-    std::cerr << "[getResponse] finished successfully" << std::endl;
-    ::close(fd);
-}
-
-
-int main()
-{
-    SendTotalSizeLessThan4();
-    SendHeaderSizeGreaterThanBody();
-    SendIncompletePacket();
-    return 0;
+    server.stop();
 }

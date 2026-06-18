@@ -56,10 +56,10 @@ static bool doOneLoginCall(std::shared_ptr<MyRpcChannel> ch)
 TEST(RpcChannelPoolTest, StartShouldCreateFixedConnections)
 {
         
-    ControlledTcpServer server(18080, buildEmptyResponseBody);
+    ControlledTcpServer server(0, buildEmptyResponseBody);
     ASSERT_TRUE(server.start());
 
-    RpcChannelPool pool("127.0.0.1", 18080, 4);
+    RpcChannelPool pool("127.0.0.1", server.port(), 4);
     ASSERT_TRUE(pool.start());
 
     ASSERT_TRUE(server.waitForAcceptCount(4, std::chrono::seconds(1)));
@@ -71,10 +71,10 @@ TEST(RpcChannelPoolTest, StartShouldCreateFixedConnections)
 
 TEST(RpcChannelPoolTest, RequestsShouldBeDistributedAcrossConnections)
 {
-    ControlledTcpServer server(18081, buildEmptyResponseBody);
+    ControlledTcpServer server(0, buildEmptyResponseBody);
     ASSERT_TRUE(server.start());
 
-    RpcChannelPool pool("127.0.0.1", 18081, 4);
+    RpcChannelPool pool("127.0.0.1", server.port(), 4);
     ASSERT_TRUE(pool.start());
     ASSERT_TRUE(server.waitForAcceptCount(4, std::chrono::seconds(1)));
 
@@ -109,10 +109,10 @@ TEST(RpcChannelPoolTest, RequestsShouldBeDistributedAcrossConnections)
 
 TEST(RpcChannelPoolTest, RepairShouldReplaceClosedConnection)
 {
-    ControlledTcpServer server(18082, buildEmptyResponseBody);
+    ControlledTcpServer server(0, buildEmptyResponseBody);
     ASSERT_TRUE(server.start());
 
-    RpcChannelPool pool("127.0.0.1", 18082, 3);
+    RpcChannelPool pool("127.0.0.1", server.port(), 3);
     ASSERT_TRUE(pool.start());
 
     ASSERT_TRUE(server.waitForAcceptCount(3, std::chrono::seconds(1)));
@@ -138,10 +138,10 @@ TEST(RpcChannelPoolTest, RepairShouldReplaceClosedConnection)
 
 TEST(RpcChannelPoolTest, StopShouldCloseAllConnections)
 {
-    ControlledTcpServer server(18084, buildEmptyResponseBody);
+    ControlledTcpServer server(0, buildEmptyResponseBody);
     ASSERT_TRUE(server.start());
 
-    RpcChannelPool pool("127.0.0.1", 18084, 4);
+    RpcChannelPool pool("127.0.0.1", server.port(), 4);
     ASSERT_TRUE(pool.start());
 
     ASSERT_TRUE(server.waitForAcceptCount(4, std::chrono::seconds(1)));
@@ -158,10 +158,10 @@ TEST(RpcChannelPoolTest, StopShouldCloseAllConnections)
 
 TEST(RpcChannelPoolTest, ConcurrentPickAndRepairShouldNotCrash)
 {
-    ControlledTcpServer server(18085, buildEmptyResponseBody);
+    ControlledTcpServer server(0, buildEmptyResponseBody);
     ASSERT_TRUE(server.start());
 
-    RpcChannelPool pool("127.0.0.1", 18085, 4);
+    RpcChannelPool pool("127.0.0.1", server.port(), 4);
     ASSERT_TRUE(pool.start());
 
     ASSERT_TRUE(server.waitForAcceptCount(4, std::chrono::seconds(1)));
@@ -245,10 +245,10 @@ TEST(RpcChannelPoolTest, ConcurrentPickAndRepairShouldNotCrash)
 
 TEST(RpcChannelPoolTest, DoubleStartAndDoubleStopShouldBeSafe)
 {
-    ControlledTcpServer server(18087, buildEmptyResponseBody);
+    ControlledTcpServer server(0, buildEmptyResponseBody);
     ASSERT_TRUE(server.start());
 
-    RpcChannelPool pool("127.0.0.1", 18087, 3);
+    RpcChannelPool pool("127.0.0.1", server.port(), 3);
 
     ASSERT_TRUE(pool.start());
 
@@ -278,4 +278,3 @@ TEST(RpcChannelPoolTest, DoubleStartAndDoubleStopShouldBeSafe)
 
     server.stop();
 }
-

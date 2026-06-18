@@ -173,6 +173,9 @@ add_library(myrpc_core STATIC
     src/rpc_controller.cc
     src/ThreadPool.cc
     src/rpc_channel_pool.cc
+    src/rpc_codec.cc
+    src/rpc_transport.cc
+    src/pending_call_manager.cc
 )
 
 target_include_directories(myrpc_core PUBLIC
@@ -216,6 +219,7 @@ if (MYRPC_BUILD_EXAMPLES)
 endif()
 
 if (MYRPC_BUILD_TESTS)
+    enable_testing()
     add_subdirectory(tests)
 endif()
 

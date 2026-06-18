@@ -1,122 +1,54 @@
-#include "common.h"
-#include "rpc_channel.h"
-#include "user.pb.h"
+#include "rpc_channel_pool.h"
 #include "rpc_controller.h"
+#include "tcpserver.h"
+#include "user.pb.h"
 
-#include <google/protobuf/stubs/common.h>
-#include <iostream>
+#include <gtest/gtest.h>
 
-void PrintController(const char* case_name, SimpleRpcController& controller)
+#include <chrono>
+
+namespace
 {
-    if (controller.Failed())
-    {
-        std::cout << "[" << case_name << "] RPC failed: "
-                  << controller.ErrorText() << "\n";
-    }
-    else
-    {
-        std::cout << "[" << case_name << "] RPC ok\n";
-    }
-}
-
-void TestLoginSuccess(demo::UserService_Stub& stub)
+std::string buildLoginResponseBody(const myrpc::RpcHeader&,
+                                   const std::string&)
 {
-    SimpleRpcController controller;
-    demo::LoginRequest request;
     demo::LoginResponse response;
-
-    request.set_name("haojun");
-    request.set_password("123456");
-
-    stub.Login(&controller, &request, &response, nullptr);
-
-    PrintController("LoginSuccess", controller);
-    std::cout << "code=" << response.code()
-              << ", message=" << response.message()
-              << ", success=" << response.success() << "\n\n";
+    response.set_code(0);
+    response.set_message("login success");
+    response.set_success(true);
+    return response.SerializeAsString();
+}
 }
 
-void TestLoginWrongPassword(demo::UserService_Stub& stub)
+TEST(Request1000Test, SyncLoginRequestsShouldAllSucceed)
 {
-    SimpleRpcController controller;
-    demo::LoginRequest request;
-    demo::LoginResponse response;
+    constexpr int kRequestCount = 1000;
 
-    request.set_name("haojun");
-    request.set_password("wrong");
+    ControlledTcpServer server(0, buildLoginResponseBody);
+    ASSERT_TRUE(server.start());
 
-    stub.Login(&controller, &request, &response, nullptr);
+    RpcChannelPool pool("127.0.0.1", server.port(), 4);
+    ASSERT_TRUE(pool.start());
 
-    PrintController("LoginWrongPassword", controller);
-    std::cout << "code=" << response.code()
-              << ", message=" << response.message()
-              << ", success=" << response.success() << "\n\n";
-}
+    demo::UserService_Stub stub(&pool);
 
-void TestLoginEmptyName(demo::UserService_Stub& stub)
-{
-    SimpleRpcController controller;
-    demo::LoginRequest request;
-    demo::LoginResponse response;
-
-    request.set_name("");
-    request.set_password("123456");
-
-    stub.Login(&controller, &request, &response, nullptr);
-
-    PrintController("LoginEmptyName", controller);
-    std::cout << "code=" << response.code()
-              << ", message=" << response.message()
-              << ", success=" << response.success() << "\n\n";
-}
-
-void TestRegisterSuccess(demo::UserService_Stub& stub)
-{
-    SimpleRpcController controller;
-    demo::RegisterRequest request;
-    demo::RegisterResponse response;
-
-    request.set_name("haojun");
-    request.set_password("123456");
-
-    stub.Register(&controller, &request, &response, nullptr);
-
-    PrintController("RegisterSuccess", controller);
-    std::cout << "code=" << response.code()
-              << ", message=" << response.message()
-              << ", success=" << response.success() << "\n\n";
-}
-
-void TestRegisterEmptyName(demo::UserService_Stub& stub)
-{
-    SimpleRpcController controller;
-    demo::RegisterRequest request;
-    demo::RegisterResponse response;
-
-    request.set_name("");
-    request.set_password("123456");
-
-    stub.Register(&controller, &request, &response, nullptr);
-
-    PrintController("RegisterEmptyName", controller);
-    std::cout << "code=" << response.code()
-              << ", message=" << response.message()
-              << ", success=" << response.success() << "\n\n";
-}
-
-int main()
-{
-    MyRpcChannel channel("127.0.0.1", 8000);
-    channel.start();
-    demo::UserService_Stub stub(&channel);
-
-    for (int i = 0; i < 1000; i++)
+    for (int i = 0; i < kRequestCount; ++i)
     {
-        TestLoginSuccess(stub);
-        TestLoginWrongPassword(stub);
-        TestLoginEmptyName(stub);
-        TestRegisterSuccess(stub);
-        TestRegisterEmptyName(stub);
+        demo::LoginRequest request;
+        demo::LoginResponse response;
+        SimpleRpcController controller;
+
+        request.set_name("haojun");
+        request.set_password("123456");
+
+        stub.Login(&controller, &request, &response, nullptr);
+
+        ASSERT_FALSE(controller.Failed()) << controller.ErrorText();
+        ASSERT_TRUE(response.success());
     }
-    return 0;
+
+    EXPECT_TRUE(server.waitForTotalRequests(kRequestCount, std::chrono::seconds(1)));
+
+    pool.stop();
+    server.stop();
 }

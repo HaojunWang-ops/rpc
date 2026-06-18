@@ -1,49 +1,51 @@
-#include "rpc_channel.h"
-#include "rpc_controller.h"
-#include "rpc_closure.h"
-#include "user.pb.h"
 #include "rpc_channel_pool.h"
+#include "rpc_closure.h"
+#include "rpc_controller.h"
+#include "tcpserver.h"
+#include "user.pb.h"
 
 #include <gtest/gtest.h>
-#include <condition_variable>
-#include <mutex>
-#include <memory>
+
+#include <atomic>
 #include <chrono>
-#include <sys/socket.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <netinet/in.h>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <thread>
 
-TEST(ConnectionLostTest, AllPendingCallShouldFailedAndDoneShouldeBeCalled)
+namespace
 {
-    const int kRequestCount = 100;
-    const int port = 18000;
+std::string buildLoginResponseBody(const myrpc::RpcHeader&,
+                                   const std::string&)
+{
+    demo::LoginResponse response;
+    response.set_code(0);
+    response.set_message("ok");
+    response.set_success(true);
+    return response.SerializeAsString();
+}
+}
 
-    std::thread server_thread([&](){
-        int listenfd = ::socket(AF_INET, SOCK_STREAM, 0);
+TEST(ConnectionLostTest, AllPendingCallsShouldFailAndCallDoneOnce)
+{
+    constexpr int kPoolSize = 4;
+    constexpr int kRequestCount = 20;
 
-        int opt = 1;
-        ::setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        addr.sin_port = ::htons(port);
-        addr.sin_addr.s_addr = ::htonl(INADDR_LOOPBACK);
-
-        ASSERT_EQ(::bind(listenfd, reinterpret_cast<sockaddr*> (&addr), sizeof(addr)), 0);
-        ASSERT_EQ(::listen(listenfd, 128), 0);
-
-        int connfd = ::accept(listenfd, nullptr, nullptr);
-        ASSERT_GE(connfd, 0);
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        ::close(connfd);
-        ::close(listenfd);
+    std::atomic<bool> release_response{false};
+    ControlledTcpServer server(0, [&](const myrpc::RpcHeader& header,
+                                      const std::string& body) {
+        while (!release_response.load(std::memory_order_acquire))
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return buildLoginResponseBody(header, body);
     });
+    ASSERT_TRUE(server.start());
 
-    RpcChannelPool pool("127.0.0.1", 18000, 4);
+    RpcChannelPool pool("127.0.0.1", server.port(), kPoolSize);
     ASSERT_TRUE(pool.start());
+    ASSERT_TRUE(server.waitForAcceptCount(kPoolSize, std::chrono::seconds(1)));
+
     demo::UserService_Stub stub(&pool);
 
     std::mutex mutex;
@@ -51,7 +53,7 @@ TEST(ConnectionLostTest, AllPendingCallShouldFailedAndDoneShouldeBeCalled)
     int done_count = 0;
     int failed_count = 0;
 
-    for (int i = 0; i < kRequestCount; i++)
+    for (int i = 0; i < kRequestCount; ++i)
     {
         auto request = std::make_shared<demo::LoginRequest>();
         auto response = std::make_shared<demo::LoginResponse>();
@@ -61,36 +63,51 @@ TEST(ConnectionLostTest, AllPendingCallShouldFailedAndDoneShouldeBeCalled)
         request->set_password("123456");
 
         auto* done = SendResponseClosure(
-            [request, response, controller, &mutex, &cv, &done_count, &failed_count, kRequestCount]()
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-
-            ++done_count;
-            if (controller->Failed())
-            {
-                ++failed_count;
-            }
-
-            if (done_count == kRequestCount)
-            {
-                cv.notify_one();
-            }
-        });
+            [request, response, controller, &mutex, &cv, &done_count, &failed_count] {
+                std::lock_guard<std::mutex> lock(mutex);
+                ++done_count;
+                if (controller->Failed())
+                {
+                    ++failed_count;
+                }
+                cv.notify_all();
+            });
 
         stub.Login(controller.get(), request.get(), response.get(), done);
     }
 
+    //handler阻塞住，tcpserver只能拿到每个线程首个连接
+    ASSERT_TRUE(server.waitForTotalRequests(kPoolSize, std::chrono::seconds(1)));
+
+    for (size_t conn_id : server.connectionIds())
+    {
+        server.closeConnection(conn_id);
+    }
+    release_response.store(true, std::memory_order_release);
+
     {
         std::unique_lock<std::mutex> lock(mutex);
-        bool ok = cv.wait_for(lock, std::chrono::seconds(3), [&]()
-    {
-        return done_count == kRequestCount;
-    });
-
-    ASSERT_TRUE(ok) << "not all pending calls were completed";
-    EXPECT_EQ(done_count, kRequestCount);
-    EXPECT_EQ(failed_count, kRequestCount);
+        ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(3), [&] {
+            return done_count == kRequestCount;
+        }));
     }
 
-    server_thread.join();
+    EXPECT_EQ(done_count, kRequestCount);
+    EXPECT_EQ(failed_count, kRequestCount);
+
+    pool.stop();
+    server.stop();
 }
+
+/*
+测试意图：
+1. 客户端请求已经发出
+2. 服务端 handler 卡住，不返回 response
+3. 测试线程先关闭连接
+4. 再 release_response = true
+5. 服务端 handler 返回 response body
+6. TcpServer 尝试发送 response
+7. 但连接已经关闭，发送失败或者直接放弃
+8. 客户端 reader 已经读到 EOF / error
+9. 客户端 pending 全部 fail
+*/

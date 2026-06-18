@@ -23,6 +23,7 @@ public:
     bool start();
     void stop();
     void increaseBadFrame();
+    uint16_t port() const;
 
     size_t acceptCount() const;
     size_t activeCount() const;

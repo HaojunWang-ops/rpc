@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rpc_header.pb.h"
+#include "pending_call_manager.h"
 
 #include <google/protobuf/service.h>
 #include <google/protobuf/message.h>
@@ -9,17 +10,6 @@
 #include <condition_variable>
 #include <atomic>
 #include <memory>
-
-struct PendingCall
-{
-    google::protobuf::RpcController* controller = nullptr;
-    google::protobuf::Message* response = nullptr;
-    google::protobuf::Closure* done = nullptr;
-
-    std::mutex mutex;
-    std::condition_variable cv;
-    bool finished = false;
-};
 
 class MyRpcChannel : public google::protobuf::RpcChannel, 
                      public std::enable_shared_from_this<MyRpcChannel>
@@ -54,16 +44,12 @@ private:
 
     void readerInLoop();
 
-    void handleResponseFrame(myrpc::RpcResponseHeader header, const std::string& body);
-    void handleConnectionLost(const std::string& reason);
+    void handleResponseFrame(const myrpc::RpcResponseHeader header, const std::string& body);
 
     void setLastError(const std::string& error);
     std::string LastError();
 
     bool connect();
-
-    void erasePending(uint64_t request_id);
-    std::shared_ptr<PendingCall> erasePendingAndGet(uint64_t request_id);
 
     void finishEarlyError(google::protobuf::RpcController* controller,
                           google::protobuf::Closure* done,
@@ -84,14 +70,12 @@ private:
 private:
     std::string ip_;
     uint16_t port_;
-    
+
     std::atomic<int> sockfd_ {-1};
 
     std::atomic<uint64_t> next_request_id_{1};
 
-    std::mutex pending_mutex_;
-    std::unordered_map<uint64_t, std::shared_ptr<PendingCall> > pending_;
-    bool accepting_call_{false};//能否发起新的rpc请求,由pending_mutex_保护
+    PendingCallManager pending_;
 
     std::mutex lifecycle_mutex_;
     State state_{State::kStopped};//状态机，start/stop中，由lifecycle_mutex_保护

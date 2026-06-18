@@ -1,81 +1,87 @@
-#include "rpc_provider.h"
-#include "user.pb.h"
-#include "rpc_header.pb.h"
-#include "rpc_controller.h"
-#include "rpc_channel.h"
-#include "Logging.h"
 #include "rpc_channel_pool.h"
+#include "rpc_closure.h"
+#include "rpc_controller.h"
+#include "tcpserver.h"
+#include "user.pb.h"
 
-#include <google/protobuf/stubs/common.h>
-#include <iostream>
-#include <thread>
+#include <gtest/gtest.h>
+
 #include <chrono>
-#include <mutex>
 #include <condition_variable>
+#include <memory>
+#include <mutex>
 
-void batch_async(demo::UserService_Stub& stub) 
+namespace
 {
-    const int kRequestCount = 100;
-    auto completed = std::make_shared<std::atomic<int>>(0);
+std::string buildLoginResponseBody(const myrpc::RpcHeader&,
+                                   const std::string&)
+{
+    demo::LoginResponse response;
+    response.set_code(0);
+    response.set_message("login success");
+    response.set_success(true);
+    return response.SerializeAsString();
+}
+}
+
+TEST(BatchAsyncTest, AllAsyncCallsShouldCompleteExactlyOnce)
+{
+    constexpr int kRequestCount = 100;
+
+    ControlledTcpServer server(0, buildLoginResponseBody);
+    ASSERT_TRUE(server.start());
+
+    RpcChannelPool pool("127.0.0.1", server.port(), 2);
+    ASSERT_TRUE(pool.start());
+
+    demo::UserService_Stub stub(&pool);
 
     std::mutex mutex;
     std::condition_variable cv;
-    bool all_done;
+    int done_count = 0;
+    int failed_count = 0;
+    int success_response_count = 0;
 
-    for (int i = 0; i < kRequestCount; i++)
+    for (int i = 0; i < kRequestCount; ++i)
     {
-        auto* request = new demo::LoginRequest;
-        auto* response = new demo::LoginResponse;
-        auto* controller = new SimpleRpcController;
+        auto request = std::make_shared<demo::LoginRequest>();
+        auto response = std::make_shared<demo::LoginResponse>();
+        auto controller = std::make_shared<SimpleRpcController>();
 
         request->set_name("haojun");
         request->set_password("123456");
 
         google::protobuf::Closure* done = SendResponseClosure(
-            [completed, request, response, controller, &mutex, &cv, &all_done, kRequestCount]()
-            {
+            [request, response, controller, &mutex, &cv,
+             &done_count, &failed_count, &success_response_count] {
+                std::lock_guard<std::mutex> lock(mutex);
+                ++done_count;
                 if (controller->Failed())
                 {
-                    LOG_ERROR << "request " << request->name() << " failed: " << controller->ErrorText();
+                    ++failed_count;
                 }
-                else
+                if (response->success())
                 {
-                    LOG_INFO << "request " << request->name() << " success: " << response->DebugString();
+                    ++success_response_count;
                 }
+                cv.notify_all();
+            });
 
-                delete request;
-                delete response;
-                delete controller;
+        stub.Login(controller.get(), request.get(), response.get(), done);
+    }
 
-                int n = ++(*completed);
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(3), [&] {
+            return done_count == kRequestCount;
+        }));
+    }
 
-                if (n == kRequestCount) {
-                    {
-                        std::lock_guard<std::mutex> lock(mutex);
-                        all_done = true;
-                    }
-                    cv.notify_one();
-                    LOG_INFO << "all requests completed";
-                }
-            }
-        );
-        stub.Login(controller, request, response, done);
+    EXPECT_EQ(done_count, kRequestCount);
+    EXPECT_EQ(failed_count, 0);
+    EXPECT_EQ(success_response_count, kRequestCount);
+    EXPECT_TRUE(server.waitForTotalRequests(kRequestCount, std::chrono::seconds(1)));
 
-
-    }        
-    std::unique_lock<std::mutex> lock(mutex);
-    cv.wait(lock, [&all_done](){
-        return all_done;
-    });
-}
-
-int main()
-{
-    RpcChannelPool pool("127.0.0.1", 8000, 1);
-    pool.start();
-    demo::UserService_Stub stub(&pool);
-
-    batch_async(stub);
-
-    return 0;
+    pool.stop();
+    server.stop();
 }

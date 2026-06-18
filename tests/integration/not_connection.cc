@@ -1,33 +1,31 @@
-#include "user.pb.h"
-#include "rpc_controller.h"
 #include "rpc_channel.h"
-#include "Logging.h"
 #include "rpc_closure.h"
+#include "rpc_controller.h"
+#include "user.pb.h"
 
 #include <gtest/gtest.h>
-#include <google/protobuf/stubs/common.h>
-#include <iostream>
-#include <thread>
-#include <chrono>
-#include <mutex>
-#include <condition_variable>
 
+#include <chrono>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+
+namespace
+{
 struct AsyncState
 {
     std::mutex mutex;
     std::condition_variable cv;
-
-    bool done_called = false;
+    int done_count = 0;
     bool controller_failed = false;
     std::string error_text;
 };
+}
 
-TEST (NotConnectionTest, RpcChannelNotStartAndPendingCallShouldeBeDone)
+TEST(NotConnectionTest, AsyncCallBeforeStartShouldFailAndCallDoneOnce)
 {
-    MyRpcChannel channel("127.0.0.1", 8000);
-    // no channel.start()
-
-    demo::UserService_Stub stub(&channel);
+    auto channel = std::make_shared<MyRpcChannel>("127.0.0.1", 1);
+    demo::UserService_Stub stub(channel.get());
 
     auto request = std::make_shared<demo::LoginRequest>();
     auto response = std::make_shared<demo::LoginResponse>();
@@ -37,26 +35,41 @@ TEST (NotConnectionTest, RpcChannelNotStartAndPendingCallShouldeBeDone)
     request->set_name("Tom");
     request->set_password("123456");
 
-    google::protobuf::Closure *done = SendResponseClosure(
-        [request, response, controller, state]()
-        {
+    google::protobuf::Closure* done = SendResponseClosure(
+        [request, response, controller, state] {
             std::lock_guard<std::mutex> lock(state->mutex);
-
-            state->done_called = true;
+            ++state->done_count;
             state->controller_failed = controller->Failed();
-            state->error_text = controller->error_text();
-
+            state->error_text = controller->ErrorText();
             state->cv.notify_one();
         });
 
     stub.Login(controller.get(), request.get(), response.get(), done);
 
     std::unique_lock<std::mutex> lock(state->mutex);
-    bool ok = state->cv.wait_for(lock, std::chrono::seconds(3),[&](){
-        return state->done_called == true;
-    });
+    ASSERT_TRUE(state->cv.wait_for(lock, std::chrono::seconds(1), [&] {
+        return state->done_count == 1;
+    }));
 
-    ASSERT_TRUE(ok) << "done was not called";
+    EXPECT_EQ(state->done_count, 1);
     EXPECT_TRUE(state->controller_failed);
     EXPECT_FALSE(state->error_text.empty());
+}
+
+TEST(NotConnectionTest, SyncCallBeforeStartShouldFailWithoutBlocking)
+{
+    auto channel = std::make_shared<MyRpcChannel>("127.0.0.1", 1);
+    demo::UserService_Stub stub(channel.get());
+
+    demo::LoginRequest request;
+    demo::LoginResponse response;
+    SimpleRpcController controller;
+
+    request.set_name("Tom");
+    request.set_password("123456");
+
+    stub.Login(&controller, &request, &response, nullptr);
+
+    EXPECT_TRUE(controller.Failed());
+    EXPECT_FALSE(controller.ErrorText().empty());
 }

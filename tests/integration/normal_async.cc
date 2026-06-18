@@ -1,50 +1,49 @@
-#include "common.h"
-#include "rpc_channel.h"
-#include "user.pb.h"
-#include "rpc_controller.h"
 #include "rpc_channel_pool.h"
+#include "rpc_controller.h"
+#include "tcpserver.h"
+#include "user.pb.h"
 
-#include <google/protobuf/stubs/common.h>
-#include <iostream>
+#include <gtest/gtest.h>
 
-void PrintController(const char* case_name, SimpleRpcController& controller)
+#include <chrono>
+
+namespace
 {
-    if (controller.Failed())
-    {
-        std::cout << "[" << case_name << "] RPC failed: "
-                  << controller.ErrorText() << "\n";
-    }
-    else
-    {
-        std::cout << "[" << case_name << "] RPC ok\n";
-    }
+std::string buildLoginResponseBody(const myrpc::RpcHeader&,
+                                   const std::string&)
+{
+    demo::LoginResponse response;
+    response.set_code(0);
+    response.set_message("login success");
+    response.set_success(true);
+    return response.SerializeAsString();
+}
 }
 
-void TestLoginSuccess(demo::UserService_Stub& stub)
+TEST(NormalRpcTest, SyncLoginShouldReturnResponse)
 {
-    SimpleRpcController controller;
+    ControlledTcpServer server(0, buildLoginResponseBody);
+    ASSERT_TRUE(server.start());
+
+    RpcChannelPool pool("127.0.0.1", server.port(), 1);
+    ASSERT_TRUE(pool.start());
+
+    demo::UserService_Stub stub(&pool);
     demo::LoginRequest request;
     demo::LoginResponse response;
+    SimpleRpcController controller;
 
     request.set_name("haojun");
     request.set_password("123456");
 
     stub.Login(&controller, &request, &response, nullptr);
 
-    PrintController("LoginSuccess", controller);
-    std::cout << "code=" << response.code()
-              << ", message=" << response.message()
-              << ", success=" << response.success() << "\n\n";
-}
+    ASSERT_FALSE(controller.Failed()) << controller.ErrorText();
+    EXPECT_TRUE(response.success());
+    EXPECT_EQ(response.code(), 0);
+    EXPECT_EQ(response.message(), "login success");
+    EXPECT_TRUE(server.waitForTotalRequests(1, std::chrono::seconds(1)));
 
-int main()
-{
-
-    RpcChannelPool pool("127.0.0.1", 8000, 1);
-    pool.start();
-    demo::UserService_Stub stub(&pool);
-
-    TestLoginSuccess(stub);
-
-    return 0;
+    pool.stop();
+    server.stop();
 }
