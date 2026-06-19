@@ -7,15 +7,10 @@
 #include "CountDownLatch.h"
 #include <rpc_codec.h>
 
-#include <arpa/inet.h>
 #include <google/protobuf/descriptor.h>
 #include <string>
 #include <iostream>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
 #include <errno.h>
-#include <stdio.h>
 #include <exception>
 #include <signal.h>
 
@@ -40,7 +35,6 @@ MyRpcChannel::MyRpcChannel(const std::string ip, uint16_t port)
     : ip_(ip), port_(port)
 {
     running_.store(false, std::memory_order_release);
-    sockfd_.store(-1, std::memory_order_release);
     state_ = State::kStopped;
 }
 
@@ -93,14 +87,7 @@ void MyRpcChannel::joinReaderIfNeeded()
 
 void MyRpcChannel::shutdownSocket()
 {
-    std::lock_guard<std::mutex> lock(fd_mutex_);
-
-    int fd = sockfd_.load(std::memory_order_acquire);
-
-    if (fd >= 0)
-    {
-        ::shutdown(fd, SHUT_RDWR);
-    }
+    transport_.shutdown();
 }
 
 void MyRpcChannel::stop()
@@ -199,33 +186,13 @@ bool MyRpcChannel::isAvailable()
 
 bool MyRpcChannel::connect()
 {
-    int fd = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
+    std::string error;
+
+    if (!transport_.connectTo(ip_, port_, &error))
     {
-        setLastError("create socket failed");
-        closeSocketAfterIoStopped();
+        setLastError(error);
         return false;
     }
-
-    sockfd_.store(fd, std::memory_order_release);
-
-    struct sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = ::htons(port_);
-    if (::inet_pton(AF_INET, ip_.c_str(), &(addr.sin_addr)) <= 0)
-    {
-        setLastError("inet_pton failed");
-        closeSocketAfterIoStopped();
-        return false;
-    }
-
-    if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) < 0)
-    {
-        setLastError("connect failed");
-        closeSocketAfterIoStopped();
-        return false;
-    }
-
     return true;
 }
 
@@ -461,95 +428,17 @@ void MyRpcChannel::finishCallWithError(const std::shared_ptr<PendingCall> &call,
 
 void MyRpcChannel::closeSocketAfterIoStopped()
 {
-    std::lock_guard<std::mutex> lock(fd_mutex_);
-
-    int fd = sockfd_.exchange(-1, std::memory_order_acq_rel);
-
-    if (fd >= 0)
-    {
-        ::close(fd);
-    }
+    transport_.close();
 }
 
 bool MyRpcChannel::WriteN(const void *buf, size_t n)
 {
-    const char *p = reinterpret_cast<const char *>(buf);
-    size_t left = n;
-    while (left > 0)
-    {
-        if (!running_.load(std::memory_order_acquire))
-        {
-            errno = ECANCELED;
-            return false;
-        }
-
-        int fd = sockfd_.load(std::memory_order_acquire);
-        if (fd < 0)
-        {
-            errno = ECANCELED;
-            return false;
-        }
-
-        ssize_t nw = ::write(fd, p, left);
-        if (nw > 0)
-        {
-            p += nw;
-            left -= nw;
-        }
-        else if (nw == 0)
-        {
-            errno = EPIPE;
-            return false;
-        }
-        else
-        {
-            if (errno == EINTR)
-            {
-                continue;
-            }
-            return false;
-        }
-    }
-    return true;
+    return transport_.writeN(buf, n, running_);
 }
 
 bool MyRpcChannel::ReadN(void *buf, size_t n)
 {
-    char *p = reinterpret_cast<char *>(buf);
-    size_t left = n;
-    while (left > 0)
-    {
-        if (!running_.load(std::memory_order_acquire))
-        {
-            errno = ECANCELED;
-            return false;
-        }
-
-        int fd = sockfd_.load(std::memory_order_acquire);
-        if (fd < 0)
-        {
-            errno = ECANCELED;
-            return false;
-        }
-        ssize_t nr = ::read(fd, p, left);
-
-        if (nr > 0)
-        {
-            p += nr;
-            left -= nr;
-        }
-        else if (nr == 0)
-        {
-            return false;
-        }
-        else
-        {
-            if (errno == EINTR)
-                continue;
-            return false;
-        }
-    }
-    return true;
+    return transport_.readN(buf, n, running_);
 }
 
 std::unordered_map<uint64_t, std::shared_ptr<PendingCall>> MyRpcChannel::markPendingFailed(const std::string &reason)

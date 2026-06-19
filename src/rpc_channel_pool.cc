@@ -70,8 +70,7 @@ void RpcChannelPool::stop()
 
             old_snapshot = std::atomic_load_explicit(
                 &channels_snapshot_,
-                std::memory_order_acquire
-            );
+                std::memory_order_acquire);
 
             if (!old_snapshot)
             {
@@ -81,8 +80,7 @@ void RpcChannelPool::stop()
             std::atomic_store_explicit(
                 &channels_snapshot_,
                 std::shared_ptr<ChannelList>{},
-                std::memory_order_release
-            );
+                std::memory_order_release);
         }
     }
 
@@ -98,11 +96,11 @@ void RpcChannelPool::stop()
 bool RpcChannelPool::repairChannel(size_t index)
 {
     std::shared_ptr<MyRpcChannel> old_ch;
-
+    std::shared_ptr<ChannelList> old_snapshot;
     {
         std::lock_guard<std::mutex> lock(repair_mutex_);
 
-        auto old_snapshot = std::atomic_load_explicit(
+        old_snapshot = std::atomic_load_explicit(
             &channels_snapshot_,
             std::memory_order_acquire);
 
@@ -117,36 +115,62 @@ bool RpcChannelPool::repairChannel(size_t index)
         {
             return true;
         }
-
-        auto new_ch = std::make_shared<MyRpcChannel>(ip_, port_);
-        if (!new_ch->start())
-        {
-            return false;
-        }
-
-        auto new_channels = std::make_shared<ChannelList>(*old_snapshot);
-        (*new_channels)[index] = new_ch;
-
-        std::shared_ptr<ChannelList> new_snapshot = new_channels;
-
-        std::atomic_store_explicit(
-            &channels_snapshot_,
-            new_snapshot,
-            std::memory_order_release);
     }
 
-    if (old_ch)
+    auto new_ch = std::make_shared<MyRpcChannel>(ip_, port_);
+    if (!new_ch->start())
     {
-        old_ch->stop();
+        return false;
     }
 
-    return true;
+    auto new_channels = std::make_shared<ChannelList>(*old_snapshot);
+    (*new_channels)[index] = new_ch;
+
+    std::shared_ptr<ChannelList> new_snapshot = new_channels;
+
+    bool published = false;
+    {
+        std::lock_guard<std::mutex> lock(repair_mutex_);
+        auto now_snapshot = std::atomic_load_explicit(
+            &channels_snapshot_,
+            std::memory_order_acquire);
+
+        if (now_snapshot == old_snapshot)
+        {
+            std::atomic_store_explicit(
+                &channels_snapshot_,
+                new_snapshot,
+                std::memory_order_release);
+
+            published = true;
+        }
+    }
+    if (published)
+    {
+        if (old_ch)
+        {
+            old_ch->stop();
+        }
+        return true;
+    }
+    else
+    {
+        if (new_ch)
+        {
+            new_ch->stop();
+        }
+        return false;
+    }
 }
 
-bool RpcChannelPool::repairChannelUnlocked(ChannelList& new_channels, size_t index, std::vector<std::shared_ptr<MyRpcChannel> >& channels_to_stop)
+bool RpcChannelPool::repairChannelInCopy(ChannelList &new_channels, 
+                                        size_t index, 
+                                        std::vector<std::shared_ptr<MyRpcChannel>> &channels_to_stop,
+                                        std::vector<std::shared_ptr<MyRpcChannel>> &new_channels_stated,
+                                        std::vector<size_t>& new_indexs)
 {
     auto& old_ch = new_channels[index];
-    
+
     if (old_ch && old_ch->isAvailable())
     {
         return false;
@@ -161,56 +185,95 @@ bool RpcChannelPool::repairChannelUnlocked(ChannelList& new_channels, size_t ind
 
     if (old_ch)
     {
-        channels_to_stop.push_back(std::move(old_ch));
+        channels_to_stop.push_back(old_ch);
     }
 
-    old_ch = std::move(new_ch);
+    new_indexs.push_back(index);
+    new_channels_stated.push_back(std::move(new_ch));
+
     return true;
 }
 
 void RpcChannelPool::repairDeadChannels()
 {
-    std::vector<std::shared_ptr<MyRpcChannel> > channels_to_stop;
+    
+    std::shared_ptr<ChannelList> old_snapshot;
     {
         std::lock_guard<std::mutex> lock(repair_mutex_);
 
-        auto old_snapshot = std::atomic_load_explicit(
+        old_snapshot = std::atomic_load_explicit(
             &channels_snapshot_,
-            std::memory_order_acquire
-        );
+            std::memory_order_acquire);
 
         if (!old_snapshot)
         {
             return;
         }
+    }
+    auto new_snapshot = std::make_shared<ChannelList>(*old_snapshot);
 
-        auto new_snapshot = std::make_shared<ChannelList> (*old_snapshot);
+    bool changed = false;
+    std::vector<std::shared_ptr<MyRpcChannel>> channels_to_stop;
+    std::vector<std::shared_ptr<MyRpcChannel>> new_channels_started;
+    std::vector<size_t> new_indexs;
 
-        bool changed = false;
+    for (size_t i = 0; i < (*new_snapshot).size(); i++)
+    {
+        changed |= repairChannelInCopy(*new_snapshot,
+                                         i,
+                                         channels_to_stop,
+                                         new_channels_started,
+                                         new_indexs);
+    }
 
-        for (size_t i = 0; i < (*new_snapshot).size(); i++)
+    bool published = false;
+    {
+        std::lock_guard<std::mutex> lock(repair_mutex_);
+        auto now_snapshot = std::atomic_load_explicit(
+            &channels_snapshot_,
+            std::memory_order_acquire);
+
+        if (old_snapshot == now_snapshot && changed)
         {
-            changed |= repairChannelUnlocked(*new_snapshot,
-                                            i,
-                                            channels_to_stop);    
-        }
+            std::sort(new_indexs.begin(), new_indexs.end(), std::greater<size_t>());
+            for (auto index : new_indexs)
+            {
+                new_snapshot->erase(new_snapshot->begin() + index);
+            }
+            for (auto& ch : new_channels_started)
+            {
+                new_snapshot->push_back(std::move(ch));
+            }
 
-        if (changed)
-        {
             std::atomic_store_explicit(
                 &channels_snapshot_,
-                 new_snapshot,
-                std::memory_order_release
-            );
+                new_snapshot,
+                std::memory_order_release);
+            published = true;
         }
     }
 
-    for (auto& ch : channels_to_stop)
+    if (published)
     {
-        if (ch)
+        for (auto& ch : channels_to_stop)
         {
-            ch->stop();
+            if (ch)
+            {
+                ch->stop();
+            }
         }
+        return;
+    }
+    else
+    {
+        for (auto& ch : new_channels_started)
+        {
+            if (ch)
+            {
+                ch->stop();
+            }
+        }
+        return;
     }
 }
 std::shared_ptr<MyRpcChannel> RpcChannelPool::pickChannel()
@@ -260,8 +323,7 @@ size_t RpcChannelPool::unavailableCount() const
 {
     auto old_snaptshot = std::atomic_load_explicit(
         &channels_snapshot_,
-        std::memory_order_acquire
-    );
+        std::memory_order_acquire);
 
     if (!old_snaptshot)
     {
@@ -270,7 +332,7 @@ size_t RpcChannelPool::unavailableCount() const
 
     size_t count = 0;
 
-    for (const auto& ch : *old_snaptshot)
+    for (const auto &ch : *old_snaptshot)
     {
         if (!ch || !ch->isAvailable())
         {

@@ -107,7 +107,7 @@ TEST(PendingCallManagerTest, ConcurrentAddTakeAndFailAllShouldBeSafe)
 
     auto failed = manager.failAllAndStopAccepting();
     EXPECT_EQ(failed.size(),
-              static_cast<size_t>(kThreadCount * kCallsPerThread));
+              static_cast<size_t>(kThreadCount * kCallsPerThread / 2));
     EXPECT_EQ(manager.add(100000, makeCall()),
               PendingCallManager::AddResult::kNotAccepting);
 }

@@ -2,6 +2,7 @@
 
 #include "rpc_header.pb.h"
 #include "pending_call_manager.h"
+#include "rpc_transport.h"
 
 #include <google/protobuf/service.h>
 #include <google/protobuf/message.h>
@@ -71,7 +72,7 @@ private:
     std::string ip_;
     uint16_t port_;
 
-    std::atomic<int> sockfd_ {-1};
+    RpcTransport transport_;
 
     std::atomic<uint64_t> next_request_id_{1};
 
@@ -86,9 +87,6 @@ private:
     //last_error_表示channel层最近的错误原因
      std::string last_error_;
      std::mutex error_mutex_;
-
-     //保护shutdown/close的互斥
-     std::mutex fd_mutex_;
 
      std::mutex send_mutex_;
 
