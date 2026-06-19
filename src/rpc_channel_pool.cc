@@ -166,31 +166,30 @@ bool RpcChannelPool::repairChannel(size_t index)
 bool RpcChannelPool::repairChannelInCopy(ChannelList &new_channels, 
                                         size_t index, 
                                         std::vector<std::shared_ptr<MyRpcChannel>> &channels_to_stop,
-                                        std::vector<std::shared_ptr<MyRpcChannel>> &new_channels_stated,
-                                        std::vector<size_t>& new_indexs)
+                                        std::vector<std::shared_ptr<MyRpcChannel>> &new_channels_stated)
 {
-    auto& old_ch = new_channels[index];
+    auto old_ch = std::move(new_channels[index]);
 
     if (old_ch && old_ch->isAvailable())
     {
+        new_channels[index] = std::move(old_ch);
         return false;
-    }
+    } 
 
     auto new_ch = std::make_shared<MyRpcChannel>(ip_, port_);
 
     if (!new_ch->start())
     {
+        new_channels[index] = std::move(old_ch);
         return false;
     }
 
-    if (old_ch)
-    {
-        channels_to_stop.push_back(old_ch);
-    }
+    new_channels.push_back(new_ch);
+    std::swap(new_channels[index], new_channels.back());
+    new_channels.pop_back();
 
-    new_indexs.push_back(index);
+    channels_to_stop.push_back(std::move(old_ch));
     new_channels_stated.push_back(std::move(new_ch));
-
     return true;
 }
 
@@ -215,15 +214,13 @@ void RpcChannelPool::repairDeadChannels()
     bool changed = false;
     std::vector<std::shared_ptr<MyRpcChannel>> channels_to_stop;
     std::vector<std::shared_ptr<MyRpcChannel>> new_channels_started;
-    std::vector<size_t> new_indexs;
 
     for (size_t i = 0; i < (*new_snapshot).size(); i++)
     {
         changed |= repairChannelInCopy(*new_snapshot,
                                          i,
                                          channels_to_stop,
-                                         new_channels_started,
-                                         new_indexs);
+                                         new_channels_started);
     }
 
     bool published = false;
@@ -235,16 +232,6 @@ void RpcChannelPool::repairDeadChannels()
 
         if (old_snapshot == now_snapshot && changed)
         {
-            std::sort(new_indexs.begin(), new_indexs.end(), std::greater<size_t>());
-            for (auto index : new_indexs)
-            {
-                new_snapshot->erase(new_snapshot->begin() + index);
-            }
-            for (auto& ch : new_channels_started)
-            {
-                new_snapshot->push_back(std::move(ch));
-            }
-
             std::atomic_store_explicit(
                 &channels_snapshot_,
                 new_snapshot,

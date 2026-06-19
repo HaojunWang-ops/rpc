@@ -51,8 +51,7 @@ private:
     bool repairChannelInCopy(ChannelList& new_channels,
                                 size_t index,
                                 std::vector<std::shared_ptr<MyRpcChannel> >& channels_to_stop,
-                                std::vector<std::shared_ptr<MyRpcChannel> >& new_channels_stared,
-                                std::vector<size_t>& new_indexs);
+                                std::vector<std::shared_ptr<MyRpcChannel> >& new_channels_stared);
 };
 
 
