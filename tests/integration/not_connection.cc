@@ -2,6 +2,7 @@
 #include "rpc_closure.h"
 #include "rpc_controller.h"
 #include "user.pb.h"
+#include "CallbackExecutor.h"
 
 #include <gtest/gtest.h>
 
@@ -24,7 +25,9 @@ struct AsyncState
 
 TEST(NotConnectionTest, AsyncCallBeforeStartShouldFailAndCallDoneOnce)
 {
-    auto channel = std::make_shared<MyRpcChannel>("127.0.0.1", 1);
+    CallbackExecutor callbackexecutor;
+    callbackexecutor.start();
+    auto channel = std::make_shared<MyRpcChannel>("127.0.0.1", 1, &callbackexecutor);
     demo::UserService_Stub stub(channel.get());
 
     auto request = std::make_shared<demo::LoginRequest>();
@@ -58,7 +61,9 @@ TEST(NotConnectionTest, AsyncCallBeforeStartShouldFailAndCallDoneOnce)
 
 TEST(NotConnectionTest, SyncCallBeforeStartShouldFailWithoutBlocking)
 {
-    auto channel = std::make_shared<MyRpcChannel>("127.0.0.1", 1);
+    CallbackExecutor callbackexecutor;
+    callbackexecutor.start();
+    auto channel = std::make_shared<MyRpcChannel>("127.0.0.1", 1, &callbackexecutor);
     demo::UserService_Stub stub(channel.get());
 
     demo::LoginRequest request;
