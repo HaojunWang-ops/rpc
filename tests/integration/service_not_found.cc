@@ -160,6 +160,16 @@ bool sendServiceNotFoundResponse(int fd, uint64_t request_id)
            writeAll(fd, &header_size, sizeof(header_size)) &&
            writeAll(fd, header_str.data(), header_str.size());
 }
+
+bool sendOversizedResponseFrame(int fd)
+{
+    constexpr uint32_t kMaxResponseFrameSize = 64 * 1024 * 1024;
+    uint32_t total_size = ::htonl(kMaxResponseFrameSize + 1);
+    uint32_t header_size = ::htonl(0);
+
+    return writeAll(fd, &total_size, sizeof(total_size)) &&
+           writeAll(fd, &header_size, sizeof(header_size));
+}
 }
 
 TEST(ServerErrorTest, ServiceNotFoundShouldCallDoneAndSetControllerFailed)
@@ -179,6 +189,76 @@ TEST(ServerErrorTest, ServiceNotFoundShouldCallDoneAndSetControllerFailed)
             if (readRequestId(conn_fd, &request_id))
             {
                 sendServiceNotFoundResponse(conn_fd, request_id);
+            }
+            ::close(conn_fd);
+        }
+        ::close(listen_fd);
+        done.set_value();
+    });
+
+    RpcChannelPool pool("127.0.0.1", port, 1);
+    bool started = pool.start();
+    if (!started)
+    {
+        ::shutdown(listen_fd, SHUT_RDWR);
+        server_thread.join();
+        FAIL() << "pool.start() failed";
+    }
+
+    ghost::GhostService_Stub stub(&pool);
+
+    auto request = std::make_shared<ghost::GhostRequest>();
+    auto response = std::make_shared<ghost::GhostResponse>();
+    auto controller = std::make_shared<SimpleRpcController>();
+    auto state = std::make_shared<AsyncState>();
+
+    request->set_name("Tom");
+
+    google::protobuf::Closure* done = SendResponseClosure(
+        [request, response, controller, state] {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            ++state->done_count;
+            state->controller_failed = controller->Failed();
+            state->error_text = controller->ErrorText();
+            state->cv.notify_one();
+        });
+
+    stub.GhostCall(controller.get(), request.get(), response.get(), done);
+
+    {
+        std::unique_lock<std::mutex> lock(state->mutex);
+        ASSERT_TRUE(state->cv.wait_for(lock, std::chrono::seconds(2), [&] {
+            return state->done_count == 1;
+        }));
+    }
+
+    EXPECT_EQ(state->done_count, 1);
+    EXPECT_TRUE(state->controller_failed);
+    EXPECT_FALSE(state->error_text.empty());
+
+    pool.stop();
+    ASSERT_EQ(server_done_future.wait_for(std::chrono::seconds(1)),
+              std::future_status::ready);
+    server_thread.join();
+}
+
+TEST(ServerErrorTest, OversizedResponseFrameShouldFailAndCallDoneOnce)
+{
+    uint16_t port = 0;
+    int listen_fd = createListeningSocket(&port);
+    ASSERT_GE(listen_fd, 0);
+
+    std::promise<void> server_done;
+    auto server_done_future = server_done.get_future();
+
+    std::thread server_thread([listen_fd, done = std::move(server_done)]() mutable {
+        int conn_fd = ::accept(listen_fd, nullptr, nullptr);
+        if (conn_fd >= 0)
+        {
+            uint64_t request_id = 0;
+            if (readRequestId(conn_fd, &request_id))
+            {
+                sendOversizedResponseFrame(conn_fd);
             }
             ::close(conn_fd);
         }
