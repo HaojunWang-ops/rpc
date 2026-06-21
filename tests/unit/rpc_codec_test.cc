@@ -92,6 +92,27 @@ TEST(RpcCodecTest, DecodeFrameMetaShouldValidateSizes)
     EXPECT_EQ(meta.body_size, 3u);
 }
 
+TEST(RpcCodecTest, DecodeFrameMetaShouldRejectOversizedResponseFrames)
+{
+    constexpr uint32_t kMaxResponseFrameSize = 64 * 1024 * 1024;
+    constexpr uint32_t kMaxResponseHeaderSize = 1024 * 1024;
+
+    RpcCodec::FrameMeta meta;
+    std::string error;
+
+    EXPECT_FALSE(RpcCodec::decodeFrameMeta(
+        ::htonl(kMaxResponseFrameSize + 1), ::htonl(0), &meta, &error));
+    EXPECT_FALSE(error.empty());
+
+    error.clear();
+    EXPECT_FALSE(RpcCodec::decodeFrameMeta(
+        ::htonl(4 + kMaxResponseHeaderSize + 1),
+        ::htonl(kMaxResponseHeaderSize + 1),
+        &meta,
+        &error));
+    EXPECT_FALSE(error.empty());
+}
+
 TEST(RpcCodecTest, DecodeResponseHeaderShouldValidateHeaderAndBodySize)
 {
     myrpc::RpcResponseHeader response_header;
