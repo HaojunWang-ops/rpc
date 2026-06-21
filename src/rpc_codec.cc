@@ -6,8 +6,10 @@
 
 namespace
 {
-constexpr uint32_t kHeaderSizeFieldBytes = 4;
+static constexpr uint32_t kHeaderSizeFieldBytes = 4;
 
+static constexpr uint32_t kMaxResponseFrameSize = 64 * 1024 * 1024;
+static constexpr uint32_t kMaxResponseHeaderSize = 1024 * 1024;  
 void setError(std::string* error, const std::string& msg)
 {
     if (error)
@@ -122,12 +124,23 @@ bool RpcCodec::decodeFrameMeta(uint32_t net_total_size,
         return false;
     }
 
+    if (total_size > kMaxResponseFrameSize)
+    {
+        setError(error, "incorrect response frame: total_size too large");
+        return false;
+    }
+
     if (header_size > total_size - kHeaderSizeFieldBytes)
     {
         setError(error, "incorrect response frame: header_size too large");
         return false;
     }
 
+    if (header_size > kMaxResponseHeaderSize)
+    {
+        setError(error, "invalid response frame:header too large");
+        return false;
+    }
     meta->total_size = total_size;
     meta->header_size = header_size;
     meta->body_size = total_size - kHeaderSizeFieldBytes - header_size;
