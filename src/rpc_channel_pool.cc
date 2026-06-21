@@ -14,27 +14,25 @@ RpcChannelPool::~RpcChannelPool()
 bool RpcChannelPool::start()
 {
     std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
-
-    std::shared_ptr<ChannelList> new_channels;
+    if (pool_state_ != State::kStopped)
     {
-        callback_executor_->start();
-
-        std::lock_guard<std::mutex> lock(repair_mutex_);
-        auto old_snapshot = std::atomic_load_explicit(
-            &channels_snapshot_,
-            std::memory_order_acquire);
-
-        if (old_snapshot && !old_snapshot->empty())
-        {
-            return false;
-        }
-
-        new_channels = std::make_shared<ChannelList>();
+        return false;
     }
 
     if (pool_size_ == 0)
     {
         return false;
+    }
+
+    callback_executor_->start();
+    std::shared_ptr<ChannelList> new_channels;
+    {
+        std::lock_guard<std::mutex> lock(repair_mutex_);
+        auto old_snapshot = std::atomic_load_explicit(
+            &channels_snapshot_,
+            std::memory_order_acquire);
+
+        new_channels = std::make_shared<ChannelList>();
     }
 
     new_channels->reserve(pool_size_);
@@ -48,6 +46,7 @@ bool RpcChannelPool::start()
             {
                 opened->stop();
             }
+            callback_executor_->stop();
             return false;
         }
         new_channels->push_back(std::move(ch));
@@ -60,6 +59,9 @@ bool RpcChannelPool::start()
             new_channels,
             std::memory_order_release);
     }
+
+    pool_state_ = State::KRunning;
+    
     return true;
 }
 
@@ -69,16 +71,18 @@ void RpcChannelPool::stop()
     {
         std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
         {
+            if (pool_state_ != State::KRunning)
+            {
+                return;
+            }
+
+            pool_state_ = State::kStopping;
+
             std::lock_guard<std::mutex> lock(repair_mutex_);
 
             old_snapshot = std::atomic_load_explicit(
                 &channels_snapshot_,
                 std::memory_order_acquire);
-
-            if (!old_snapshot)
-            {
-                return;
-            }
 
             std::atomic_store_explicit(
                 &channels_snapshot_,
@@ -95,12 +99,37 @@ void RpcChannelPool::stop()
         }
     }
 
+    {
+        std::unique_lock<std::mutex> lock(lifecycle_mutex_);
+        lifecycle_cv_.wait(lock, [this](){
+            return active_calls_ == 0;
+        });
+    }
+
     if (callback_executor_)
     {
         callback_executor_->stop();
     }
+
+    {
+        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+        pool_state_ = State::kStopped;
+    }
+
+    return;
 }
 
+/*
+// Weak stop semantics:
+// repairDeadChannels() may run concurrently with RpcChannelPool::stop().
+// Once stop() begins, running_ becomes false and channels_snapshot_ is cleared.
+// A repair operation that has already started may still create a new channel
+// outside the repair lock. Before publishing, it must check running_ and
+// compare the current snapshot with old_snapshot.
+// If publishing succeeds, old channels are stopped.
+// If publishing fails, newly created channels are stopped.
+// RpcChannelPool::stop() does not wait for concurrent repair operations to exit.
+*/
 bool RpcChannelPool::repairChannel(size_t index)
 {
     std::shared_ptr<MyRpcChannel> old_ch;
@@ -343,22 +372,63 @@ void RpcChannelPool::CallMethod(const google::protobuf::MethodDescriptor *method
                                 google::protobuf::Message *response,
                                 google::protobuf::Closure *done)
 {
-    auto channel = pickChannel();
-
-    if (channel == nullptr)
+    if (!enterCall())
     {
         if (controller)
         {
-            controller->SetFailed("RpcChannelPool is not started");
-        }
+            controller->SetFailed("RpcChannel is stopped");
 
+        }
+        if(done)
+        {
+            done->Run();
+        }
+        return;
+    }
+
+    auto ch = pickChannel();
+
+    if (!ch)
+    {
+        if (controller)
+        {
+            controller->SetFailed("no available rpc channel");
+
+        }            
         if (done)
         {
             done->Run();
         }
 
+        leaveCall();
         return;
     }
 
-    channel->CallMethod(method, controller, request, response, done);
+    ch->CallMethod(method, controller, request, response, done);
+    leaveCall();
+}
+
+bool RpcChannelPool::enterCall()
+{
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+
+    if (pool_state_ != State::KRunning)
+    {
+        return false;
+    }
+
+    ++active_calls_;
+    return true;
+}
+
+void RpcChannelPool::leaveCall()
+{
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+
+    if (active_calls_ > 0)
+    {
+        --active_calls_;
+    }
+
+    lifecycle_cv_.notify_all();
 }
