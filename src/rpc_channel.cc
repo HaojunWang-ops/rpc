@@ -31,8 +31,9 @@ namespace
     static RpcSignalInitializer s_initializer;
 }
 
-MyRpcChannel::MyRpcChannel(const std::string ip, uint16_t port)
-    : ip_(ip), port_(port)
+MyRpcChannel::MyRpcChannel(const std::string ip, uint16_t port, CallbackExecutor* callback_executor)
+    : ip_(ip), port_(port),
+      callback_executor_(callback_executor)
 {
     running_.store(false, std::memory_order_release);
     state_ = State::kStopped;
@@ -387,7 +388,17 @@ void MyRpcChannel::finishEarlyError(google::protobuf::RpcController *controller,
     }
     if (done)
     {
-        done->Run();
+       if (callback_executor_)
+       {
+        bool ok = callback_executor_->post([done](){
+            done->Run();
+        });
+
+        if (!ok)
+        {
+            LOG_ERROR << "finishEarlyError: post callback failed";
+        }
+       } 
     }
 }
 void MyRpcChannel::finishCall(const std::shared_ptr<PendingCall> &call)
@@ -406,7 +417,17 @@ void MyRpcChannel::finishCall(const std::shared_ptr<PendingCall> &call)
     call->cv.notify_one();
     if (done)
     {
-        done->Run();
+       if (callback_executor_)
+       {
+        bool ok = callback_executor_->post([done](){
+            done->Run();
+        });
+
+        if (!ok)
+        {
+            LOG_ERROR << "finishCall: post callback failed";
+        }
+       } 
     }
 }
 

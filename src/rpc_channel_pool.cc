@@ -1,7 +1,8 @@
 #include "rpc_channel_pool.h"
 
 RpcChannelPool::RpcChannelPool(std::string ip, uint16_t port, size_t pool_size)
-    : ip_(ip), port_(port), pool_size_(pool_size)
+    : ip_(ip), port_(port), pool_size_(pool_size),
+      callback_executor_(std::make_unique<CallbackExecutor>())
 {
 }
 
@@ -16,6 +17,8 @@ bool RpcChannelPool::start()
 
     std::shared_ptr<ChannelList> new_channels;
     {
+        callback_executor_->start();
+
         std::lock_guard<std::mutex> lock(repair_mutex_);
         auto old_snapshot = std::atomic_load_explicit(
             &channels_snapshot_,
@@ -38,7 +41,7 @@ bool RpcChannelPool::start()
 
     for (size_t i = 0; i < pool_size_; i++)
     {
-        auto ch = std::make_shared<MyRpcChannel>(ip_, port_);
+        auto ch = std::make_shared<MyRpcChannel>(ip_, port_, callback_executor_.get());
         if (!ch->start())
         {
             for (auto &opened : (*new_channels))
@@ -91,6 +94,11 @@ void RpcChannelPool::stop()
             ch->stop();
         }
     }
+
+    if (callback_executor_)
+    {
+        callback_executor_->stop();
+    }
 }
 
 bool RpcChannelPool::repairChannel(size_t index)
@@ -117,7 +125,7 @@ bool RpcChannelPool::repairChannel(size_t index)
         }
     }
 
-    auto new_ch = std::make_shared<MyRpcChannel>(ip_, port_);
+    auto new_ch = std::make_shared<MyRpcChannel>(ip_, port_, callback_executor_.get());
     if (!new_ch->start())
     {
         return false;
@@ -176,7 +184,7 @@ bool RpcChannelPool::repairChannelInCopy(ChannelList &new_channels,
         return false;
     } 
 
-    auto new_ch = std::make_shared<MyRpcChannel>(ip_, port_);
+    auto new_ch = std::make_shared<MyRpcChannel>(ip_, port_, callback_executor_.get());
 
     if (!new_ch->start())
     {

@@ -3,6 +3,7 @@
 #include "rpc_header.pb.h"
 #include "pending_call_manager.h"
 #include "rpc_transport.h"
+#include "CallbackExecutor.h"
 
 #include <google/protobuf/service.h>
 #include <google/protobuf/message.h>
@@ -22,7 +23,7 @@ public:
         kStopping
     };
 
-    MyRpcChannel(const std::string ip, uint16_t port);
+    MyRpcChannel(const std::string ip, uint16_t port, CallbackExecutor* callback_executor);
     ~MyRpcChannel();
 
     bool start();
@@ -97,6 +98,7 @@ private:
 
      std::atomic<int> timeout_ms_ {3000};
 
+    CallbackExecutor* callback_executor_;
 private:
     std::unordered_map<uint64_t, std::shared_ptr<PendingCall>> markPendingFailed(const std::string& reason);
 
