@@ -4,6 +4,7 @@
 #include "pending_call_manager.h"
 #include "rpc_transport.h"
 #include "CallbackExecutor.h"
+#include "rpc_timeout_manager.h"
 
 #include <google/protobuf/service.h>
 #include <google/protobuf/message.h>
@@ -99,11 +100,15 @@ private:
      std::atomic<int> timeout_ms_ {3000};
 
     CallbackExecutor* callback_executor_;
+
+    void onRpcTimeout(uint64_t request_id);
 private:
     std::unordered_map<uint64_t, std::shared_ptr<PendingCall>> markPendingFailed(const std::string& reason);
 
     void failFromReaderThread(const std::string& reason);
     void detachReaderHandleIfCurrentThread();
+
+    RpcTimeoutManager timeout_manager_;
 };
 
 /*

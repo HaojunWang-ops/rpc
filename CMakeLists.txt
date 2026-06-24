@@ -176,6 +176,7 @@ add_library(myrpc_core STATIC
     src/rpc_codec.cc
     src/rpc_transport.cc
     src/pending_call_manager.cc
+    src/rpc_timeout_manager.cc
 )
 
 target_include_directories(myrpc_core PUBLIC

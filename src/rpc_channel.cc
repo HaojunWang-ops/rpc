@@ -31,9 +31,11 @@ namespace
     static RpcSignalInitializer s_initializer;
 }
 
-MyRpcChannel::MyRpcChannel(const std::string ip, uint16_t port, CallbackExecutor* callback_executor)
+MyRpcChannel::MyRpcChannel(const std::string ip, uint16_t port, CallbackExecutor *callback_executor)
     : ip_(ip), port_(port),
-      callback_executor_(callback_executor)
+      callback_executor_(callback_executor),
+      timeout_manager_([this](uint64_t request_id)
+                       { this->onRpcTimeout(request_id); })
 {
     running_.store(false, std::memory_order_release);
     state_ = State::kStopped;
@@ -99,6 +101,8 @@ void MyRpcChannel::stop()
 
     cleanupStoppedConnection();
 
+    timeout_manager_.stop();
+
     {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
         state_ = State::kStopped;
@@ -115,6 +119,8 @@ void MyRpcChannel::stopInternal()
     auto pending = markPendingFailed("stopInternal() is called");
 
     cleanupStoppedConnection();
+
+    timeout_manager_.stop();
 
     {
         std::lock_guard<std::mutex> lock(lifecycle_mutex_);
@@ -164,6 +170,8 @@ bool MyRpcChannel::start()
         reader_thread_ = std::move(new_reader);
         reader_thread_id_ = reader_thread_.get_id();
     }
+
+    timeout_manager_.start();
 
     pending_.resetForStart();
 
@@ -220,7 +228,6 @@ void MyRpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
         return;
     }
 
-    
     auto add_result = pending_.add(request_id, call);
 
     if (add_result == PendingCallManager::AddResult::kNotAccepting)
@@ -235,12 +242,14 @@ void MyRpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
         return;
     }
 
+    
+
     bool write_ok = false;
     {
         std::lock_guard<std::mutex> lock(send_mutex_);
         write_ok = WriteN(send_buf.data(), send_buf.size());
     }
-
+    timeout_manager_.add(request_id, std::chrono::milliseconds(timeout_ms_));
     // 一定不能在锁里面执行回调
     if (!write_ok)
     {
@@ -254,15 +263,11 @@ void MyRpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
 
     if (done == nullptr)
     {
-        bool ok;
-        {
-            std::unique_lock<std::mutex> lock(call->mutex);
-            ok = call->cv.wait_for(lock,
-                                   std::chrono::milliseconds(timeout_ms_.load(std::memory_order_acquire)),
-                                   [&call]()
-                                   { return call->finished; });
-        }
-        if (!ok)
+        std::unique_lock<std::mutex> lock(call->mutex);
+        call->cv.wait(lock, [&call]()
+                      { return call->finished; });
+
+        /*if (!ok)
         {
             // 谁能从 pending_ 里 erase 掉这个 request_id，谁拥有这次调用的完成权
             // 防止出现reader 线程刚刚从 pending_ 里拿走 call，但还没来得及设置 finished，同步线程 wait_for 超时
@@ -282,7 +287,7 @@ void MyRpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
                           { return call->finished; });
 
             return;
-        }
+        }*/
     }
 }
 
@@ -388,17 +393,16 @@ void MyRpcChannel::finishEarlyError(google::protobuf::RpcController *controller,
     }
     if (done)
     {
-       if (callback_executor_)
-       {
-        bool ok = callback_executor_->post([done](){
-            done->Run();
-        });
-
-        if (!ok)
+        if (callback_executor_)
         {
-            LOG_ERROR << "finishEarlyError: post callback failed";
+            bool ok = callback_executor_->post([done]()
+                                               { done->Run(); });
+
+            if (!ok)
+            {
+                LOG_ERROR << "finishEarlyError: post callback failed";
+            }
         }
-       } 
     }
 }
 void MyRpcChannel::finishCall(const std::shared_ptr<PendingCall> &call)
@@ -417,17 +421,16 @@ void MyRpcChannel::finishCall(const std::shared_ptr<PendingCall> &call)
     call->cv.notify_one();
     if (done)
     {
-       if (callback_executor_)
-       {
-        bool ok = callback_executor_->post([done](){
-            done->Run();
-        });
-
-        if (!ok)
+        if (callback_executor_)
         {
-            LOG_ERROR << "finishCall: post callback failed";
+            bool ok = callback_executor_->post([done]()
+                                               { done->Run(); });
+
+            if (!ok)
+            {
+                LOG_ERROR << "finishCall: post callback failed";
+            }
         }
-       } 
     }
 }
 
@@ -525,4 +528,16 @@ void MyRpcChannel::detachReaderHandleIfCurrentThread()
         reader_thread_.detach();
         reader_thread_id_ = std::thread::id{};
     }
+}
+
+void MyRpcChannel::onRpcTimeout(uint64_t request_id)
+{
+    auto call = pending_.take(request_id);
+
+    if (!call)
+    {
+        return;
+    }
+
+    finishCallWithError(call, "rpc call timeout");
 }
