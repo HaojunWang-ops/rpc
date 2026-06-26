@@ -3,9 +3,11 @@
 #include "rpc_channel.h"
 #include "rpc_controller.h"
 #include "CallbackExecutor.h"
+#include "rpc_future.h"
 
 #include <google/protobuf/service.h>
 
+#include <future>
 #include <atomic>
 #include <cstddef>
 #include <memory>
@@ -15,7 +17,8 @@
 class RpcChannelPool : public google::protobuf::RpcChannel
 {
 public:
-    enum class State{
+    enum class State
+    {
         kStopped,
         KRunning,
         kStopping
@@ -46,26 +49,27 @@ public:
 
     void stop();
 
-    void CallMethod(const google::protobuf::MethodDescriptor* method,
-                    google::protobuf::RpcController* controller,
-                    const google::protobuf::Message* request,
-                    google::protobuf::Message* response,
-                    google::protobuf::Closure* done) override;
+    void CallMethod(const google::protobuf::MethodDescriptor *method,
+                    google::protobuf::RpcController *controller,
+                    const google::protobuf::Message *request,
+                    google::protobuf::Message *response,
+                    google::protobuf::Closure *done) override;
 
     void repairDeadChannels();
 
     size_t unavailableCount() const;
 
     bool isRunning() const;
+
 private:
     std::string ip_;
     uint16_t port_;
     size_t pool_size_;
-    
-    std::condition_variable lifecycle_cv_;
-    std::mutex lifecycle_mutex_; //保护 start() 和 stop() 串行化执行
 
-    std::mutex repair_mutex_; //保护channels_ 和 next_
+    std::condition_variable lifecycle_cv_;
+    std::mutex lifecycle_mutex_; // 保护 start() 和 stop() 串行化执行
+
+    std::mutex repair_mutex_; // 保护channels_ 和 next_
 
     using ChannelPtr = std::shared_ptr<MyRpcChannel>;
     using ChannelList = std::vector<ChannelPtr>;
@@ -78,19 +82,63 @@ private:
     State pool_state_{State::kStopped};
 
     int active_calls_{0};
+
 private:
     bool repairChannel(size_t index);
-    bool repairChannelInCopy(ChannelList& new_channels,
-                                size_t index,
-                                std::vector<std::shared_ptr<MyRpcChannel> >& channels_to_stop,
-                                std::vector<std::shared_ptr<MyRpcChannel> >& new_channels_stared);
+    bool repairChannelInCopy(ChannelList &new_channels,
+                             size_t index,
+                             std::vector<std::shared_ptr<MyRpcChannel>> &channels_to_stop,
+                             std::vector<std::shared_ptr<MyRpcChannel>> &new_channels_stared);
 
     std::shared_ptr<MyRpcChannel> pickChannel();
-    
+
     bool enterCall();
     void leaveCall();
-};
 
+public:
+    template <typename Response, typename Request>
+    std::future<RpcFutureResult<Response>> CallMethodFuture(
+        const google::protobuf::MethodDescriptor *method,
+        const Request &request)
+    {
+        using State = FutureCallState<Request, Response>;
+
+        auto state = std::make_shared<State>();
+        state->request = request;
+
+        auto future = state->promise.get_future();
+        auto* done = new FutureClosure<Request, Response> (state);
+
+        if (!enterCall())
+        {
+            state->controller.SetFailed("RpcChannel is stopped");
+            if (done)
+            {
+                done->Run();
+            }
+            return future;
+        }
+
+        auto ch = pickChannel();
+
+        if (!ch)
+        {
+
+            state->controller.SetFailed("no available rpc channel");
+            if (done)
+            {
+                done->Run();
+            }
+
+            leaveCall();
+            return future;
+        }
+
+        ch->CallMethod(method, &state->controller, &state->request, &state->response, done);
+        leaveCall();
+        return future;
+    }
+};
 
 // Threading model:
 // 1. CallMethod() can be called concurrently.

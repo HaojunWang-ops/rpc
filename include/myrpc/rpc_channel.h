@@ -5,6 +5,7 @@
 #include "rpc_transport.h"
 #include "CallbackExecutor.h"
 #include "rpc_timeout_manager.h"
+#include <rpc_future.h>
 
 #include <google/protobuf/service.h>
 #include <google/protobuf/message.h>
@@ -13,18 +14,20 @@
 #include <condition_variable>
 #include <atomic>
 #include <memory>
+#include <future>
 
-class MyRpcChannel : public google::protobuf::RpcChannel, 
+class MyRpcChannel : public google::protobuf::RpcChannel,
                      public std::enable_shared_from_this<MyRpcChannel>
 {
 public:
-    enum class State{
+    enum class State
+    {
         kStopped,
         kRunning,
         kStopping
     };
 
-    MyRpcChannel(const std::string ip, uint16_t port, CallbackExecutor* callback_executor);
+    MyRpcChannel(const std::string ip, uint16_t port, CallbackExecutor *callback_executor);
     ~MyRpcChannel();
 
     bool start();
@@ -32,33 +35,34 @@ public:
     bool reconnect();
     bool isAvailable();
 
-    void CallMethod(const google::protobuf::MethodDescriptor* method,
-                    google::protobuf::RpcController* controller,
-                    const google::protobuf::Message* request,
-                    google::protobuf::Message* response,
-                    google::protobuf::Closure* done);
-    
+    void CallMethod(const google::protobuf::MethodDescriptor *method,
+                    google::protobuf::RpcController *controller,
+                    const google::protobuf::Message *request,
+                    google::protobuf::Message *response,
+                    google::protobuf::Closure *done);
+
     void setTimeoutMs(int timeout_ms);
 
     int timeoutMs() const;
+
 private:
-    bool ReadN(void* buf, size_t n);
-    bool WriteN(const void* buf, size_t n);
+    bool ReadN(void *buf, size_t n);
+    bool WriteN(const void *buf, size_t n);
 
     void readerInLoop();
 
-    void handleResponseFrame(const myrpc::RpcResponseHeader header, const std::string& body);
+    void handleResponseFrame(const myrpc::RpcResponseHeader header, const std::string &body);
 
-    void setLastError(const std::string& error);
+    void setLastError(const std::string &error);
     std::string LastError();
 
     bool connect();
 
-    void finishEarlyError(google::protobuf::RpcController* controller,
-                          google::protobuf::Closure* done,
-                          const std::string& error);
-    void finishCall(const std::shared_ptr<PendingCall>& call);
-    void finishCallWithError(const std::shared_ptr<PendingCall>& call, const std::string& error);
+    void finishEarlyError(google::protobuf::RpcController *controller,
+                          google::protobuf::Closure *done,
+                          const std::string &error);
+    void finishCall(const std::shared_ptr<PendingCall> &call);
+    void finishCallWithError(const std::shared_ptr<PendingCall> &call, const std::string &error);
 
     void closeSocketAfterIoStopped();
 
@@ -70,6 +74,7 @@ private:
     void cleanupStoppedConnection();
 
     void stopInternal();
+
 private:
     std::string ip_;
     uint16_t port_;
@@ -81,34 +86,60 @@ private:
     PendingCallManager pending_;
 
     std::mutex lifecycle_mutex_;
-    State state_{State::kStopped};//状态机，start/stop中，由lifecycle_mutex_保护
+    State state_{State::kStopped}; // 状态机，start/stop中，由lifecycle_mutex_保护
 
-    std::atomic<bool> running_{false};//通知readerInLoop退出
+    std::atomic<bool> running_{false}; // 通知readerInLoop退出
 
-    //controller中error_text_表示这次rpc的错误原因
-    //last_error_表示channel层最近的错误原因
-     std::string last_error_;
-     std::mutex error_mutex_;
+    // controller中error_text_表示这次rpc的错误原因
+    // last_error_表示channel层最近的错误原因
+    std::string last_error_;
+    std::mutex error_mutex_;
 
-     std::mutex send_mutex_;
+    std::mutex send_mutex_;
 
-     //保护reader_thread_ 的 move/join/get_id
+    // 保护reader_thread_ 的 move/join/get_id
     std::thread reader_thread_;
     mutable std::mutex reader_mutex_;
     std::thread::id reader_thread_id_;
 
-     std::atomic<int> timeout_ms_ {3000};
+    std::atomic<int> timeout_ms_{3000};
 
-    CallbackExecutor* callback_executor_;
+    CallbackExecutor *callback_executor_;
 
     void onRpcTimeout(uint64_t request_id);
-private:
-    std::unordered_map<uint64_t, std::shared_ptr<PendingCall>> markPendingFailed(const std::string& reason);
 
-    void failFromReaderThread(const std::string& reason);
+private:
+    std::unordered_map<uint64_t, std::shared_ptr<PendingCall>> markPendingFailed(const std::string &reason);
+
+    void failFromReaderThread(const std::string &reason);
     void detachReaderHandleIfCurrentThread();
 
     RpcTimeoutManager timeout_manager_;
+
+public:
+    template <typename Response, typename Request>
+    std::future<RpcFutureResult<Response>> CallMethodFuture(
+        const google::protobuf::MethodDescriptor *method,
+        const Request &request)
+    {
+        using State = FutureCallState<Request, Response>;
+
+        auto state = std::make_shared<State>();
+        state->request = request;
+
+        auto future = state->promise.get_future();
+
+        auto *done = new FutureClosure<Request, Response>(state);
+
+        CallMethod(
+            method,
+            &state->controller,
+            &state->request,
+            &state->response,
+            done);
+
+        return future;
+    }
 };
 
 /*
