@@ -58,6 +58,7 @@ private:
 
     bool connect();
 
+    void runDone(google::protobuf::Closure *done);
     void finishEarlyError(google::protobuf::RpcController *controller,
                           google::protobuf::Closure *done,
                           const std::string &error);

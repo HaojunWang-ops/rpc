@@ -383,6 +383,29 @@ std::string MyRpcChannel::LastError()
     return last_error_;
 }
 
+void MyRpcChannel::runDone(google::protobuf::Closure *done)
+{
+    if (!done)
+    {
+        return;
+    }
+
+    if (callback_executor_)
+    {
+        bool ok = callback_executor_->post([done](){
+            done->Run();
+        });
+
+        if (ok)
+        {
+            return;
+        }
+    }
+
+    LOG_ERROR << "post callback failed";
+    done->Run();
+}
+
 void MyRpcChannel::finishEarlyError(google::protobuf::RpcController *controller,
                                     google::protobuf::Closure *done,
                                     const std::string &error)
@@ -391,19 +414,8 @@ void MyRpcChannel::finishEarlyError(google::protobuf::RpcController *controller,
     {
         controller->SetFailed(error);
     }
-    if (done)
-    {
-        if (callback_executor_)
-        {
-            bool ok = callback_executor_->post([done]()
-                                               { done->Run(); });
 
-            if (!ok)
-            {
-                LOG_ERROR << "finishEarlyError: post callback failed";
-            }
-        }
-    }
+    runDone(done);
 }
 void MyRpcChannel::finishCall(const std::shared_ptr<PendingCall> &call)
 {
@@ -419,19 +431,8 @@ void MyRpcChannel::finishCall(const std::shared_ptr<PendingCall> &call)
         call->finished = true;
     }
     call->cv.notify_one();
-    if (done)
-    {
-        if (callback_executor_)
-        {
-            bool ok = callback_executor_->post([done]()
-                                               { done->Run(); });
 
-            if (!ok)
-            {
-                LOG_ERROR << "finishCall: post callback failed";
-            }
-        }
-    }
+    runDone(done);
 }
 
 void MyRpcChannel::finishCallWithError(const std::shared_ptr<PendingCall> &call,
@@ -449,6 +450,7 @@ void MyRpcChannel::finishCallWithError(const std::shared_ptr<PendingCall> &call,
 
     finishCall(call);
 }
+
 
 void MyRpcChannel::closeSocketAfterIoStopped()
 {
