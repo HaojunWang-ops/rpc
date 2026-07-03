@@ -26,7 +26,20 @@ void RpcProvider::NotifyService(google::protobuf::Service *service)
         return;
     }
 
+    if (service == nullptr)
+    {
+        LOG_ERROR << "service is nullptr when notify";
+        return;
+    }
+
     const google::protobuf::ServiceDescriptor *service_desc = service->GetDescriptor();
+    
+    std::string service_name = service_desc->full_name();
+    if (service_map_.find(service_name) != service_map_.end())
+    {
+        LOG_ERROR << "notifyservice donot allow repeadted service";
+        return;
+    }
 
     struct ServiceInfo serviceinfo;
     serviceinfo.service = service;
@@ -37,8 +50,7 @@ void RpcProvider::NotifyService(google::protobuf::Service *service)
         std::string method_name = method_desc->name();
         serviceinfo.method_map.emplace(method_name, method_desc);
     }
-
-    std::string service_name = service_desc->full_name();
+    
     service_map_.emplace(service_name, serviceinfo);
 }
 
