@@ -39,7 +39,7 @@ bool RpcChannelPool::start()
 
     for (size_t i = 0; i < pool_size_; i++)
     {
-        auto ch = std::make_shared<MyRpcChannel>(ip_, port_, callback_executor_.get());
+        auto ch = MyRpcChannel::create(ip_, port_, callback_executor_.get());
         if (!ch->start())
         {
             for (auto &opened : (*new_channels))
@@ -154,7 +154,7 @@ bool RpcChannelPool::repairChannel(size_t index)
         }
     }
 
-    auto new_ch = std::make_shared<MyRpcChannel>(ip_, port_, callback_executor_.get());
+    auto new_ch = MyRpcChannel::create(ip_, port_, callback_executor_.get());
     if (!new_ch->start())
     {
         return false;
@@ -213,7 +213,7 @@ bool RpcChannelPool::repairChannelInCopy(ChannelList &new_channels,
         return false;
     } 
 
-    auto new_ch = std::make_shared<MyRpcChannel>(ip_, port_, callback_executor_.get());
+    auto new_ch = MyRpcChannel::create(ip_, port_, callback_executor_.get());
 
     if (!new_ch->start())
     {

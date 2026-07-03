@@ -27,7 +27,7 @@ TEST(NotConnectionTest, AsyncCallBeforeStartShouldFailAndCallDoneOnce)
 {
     CallbackExecutor callbackexecutor;
     callbackexecutor.start();
-    auto channel = std::make_shared<MyRpcChannel>("127.0.0.1", 1, &callbackexecutor);
+    auto channel = MyRpcChannel::create("127.0.0.1", 1, &callbackexecutor);
     demo::UserService_Stub stub(channel.get());
 
     auto request = std::make_shared<demo::LoginRequest>();
@@ -63,7 +63,7 @@ TEST(NotConnectionTest, SyncCallBeforeStartShouldFailWithoutBlocking)
 {
     CallbackExecutor callbackexecutor;
     callbackexecutor.start();
-    auto channel = std::make_shared<MyRpcChannel>("127.0.0.1", 1, &callbackexecutor);
+    auto channel = MyRpcChannel::create("127.0.0.1", 1, &callbackexecutor);
     demo::UserService_Stub stub(channel.get());
 
     demo::LoginRequest request;

@@ -102,7 +102,7 @@ TEST(RpcChannelTimeoutTest, SyncCallShouldTimeoutAndReturnWithoutBlocking)
     CallbackExecutor callback_executor;
     callback_executor.start();
 
-    auto channel = std::make_shared<MyRpcChannel>(
+    auto channel = MyRpcChannel::create(
         "127.0.0.1", server.port(), &callback_executor);
     ASSERT_TRUE(startChannel(channel, 50));
     ASSERT_TRUE(server.waitForAcceptCount(1, std::chrono::seconds(1)));
@@ -154,7 +154,7 @@ TEST(RpcChannelTimeoutTest, AsyncTimeoutsShouldCompleteEveryPendingCallExactlyOn
     CallbackExecutor callback_executor;
     callback_executor.start();
 
-    auto channel = std::make_shared<MyRpcChannel>(
+    auto channel = MyRpcChannel::create(
         "127.0.0.1", server.port(), &callback_executor);
     ASSERT_TRUE(startChannel(channel, 50));
     ASSERT_TRUE(server.waitForAcceptCount(1, std::chrono::seconds(1)));
@@ -212,7 +212,7 @@ TEST(RpcChannelTimeoutTest, SuccessfulCallsShouldNotRunDoneAgainWhenTimersExpire
     CallbackExecutor callback_executor;
     callback_executor.start();
 
-    auto channel = std::make_shared<MyRpcChannel>(
+    auto channel = MyRpcChannel::create(
         "127.0.0.1", server.port(), &callback_executor);
     ASSERT_TRUE(startChannel(channel, 500));
     ASSERT_TRUE(server.waitForAcceptCount(1, std::chrono::seconds(1)));
@@ -272,7 +272,7 @@ TEST(RpcChannelTimeoutTest, ConcurrentAsyncSubmitAndStopShouldNotLoseDone)
     CallbackExecutor callback_executor;
     callback_executor.start();
 
-    auto channel = std::make_shared<MyRpcChannel>(
+    auto channel = MyRpcChannel::create(
         "127.0.0.1", server.port(), &callback_executor);
     ASSERT_TRUE(startChannel(channel, 80));
     ASSERT_TRUE(server.waitForAcceptCount(1, std::chrono::seconds(1)));

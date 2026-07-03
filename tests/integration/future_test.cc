@@ -73,7 +73,7 @@ TEST(RpcFutureTest, ChannelFutureShouldResolveSuccessfulResponse)
     CallbackExecutor callback_executor;
     callback_executor.start();
 
-    auto channel = std::make_shared<MyRpcChannel>(
+    auto channel = MyRpcChannel::create(
         "127.0.0.1", server.port(), &callback_executor);
     ASSERT_TRUE(channel->start());
     ASSERT_TRUE(server.waitForAcceptCount(1, std::chrono::seconds(1)));
@@ -113,7 +113,7 @@ TEST(RpcFutureTest, ChannelFutureTimeoutShouldResolveError)
     CallbackExecutor callback_executor;
     callback_executor.start();
 
-    auto channel = std::make_shared<MyRpcChannel>(
+    auto channel = MyRpcChannel::create(
         "127.0.0.1", server.port(), &callback_executor);
     channel->setTimeoutMs(50);
     ASSERT_TRUE(channel->start());
@@ -152,7 +152,7 @@ TEST(RpcFutureTest, ChannelFutureConcurrentCallsShouldAllComplete)
     CallbackExecutor callback_executor;
     callback_executor.start();
 
-    auto channel = std::make_shared<MyRpcChannel>(
+    auto channel = MyRpcChannel::create(
         "127.0.0.1", server.port(), &callback_executor);
     ASSERT_TRUE(channel->start());
     ASSERT_TRUE(server.waitForAcceptCount(1, std::chrono::seconds(1)));
@@ -237,7 +237,7 @@ TEST(RpcFutureTest, ChannelStopShouldResolveInFlightFutures)
     CallbackExecutor callback_executor;
     callback_executor.start();
 
-    auto channel = std::make_shared<MyRpcChannel>(
+    auto channel = MyRpcChannel::create(
         "127.0.0.1", server.port(), &callback_executor);
     ASSERT_TRUE(channel->start());
     ASSERT_TRUE(server.waitForAcceptCount(1, std::chrono::seconds(1)));

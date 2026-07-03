@@ -27,7 +27,13 @@ public:
         kStopping
     };
 
-    MyRpcChannel(const std::string ip, uint16_t port, CallbackExecutor *callback_executor);
+    using Ptr = std::shared_ptr<MyRpcChannel>;
+
+    static Ptr create(const std::string ip, uint16_t port, CallbackExecutor *callback_executor)
+    {
+        return Ptr(new MyRpcChannel(ip, port, callback_executor));
+    }
+
     ~MyRpcChannel();
 
     bool start();
@@ -110,13 +116,14 @@ private:
     void onRpcTimeout(uint64_t request_id);
 
 private:
+    MyRpcChannel(const std::string ip, uint16_t port, CallbackExecutor *callback_executor);
+
     std::unordered_map<uint64_t, std::shared_ptr<PendingCall>> markPendingFailed(const std::string &reason);
 
     void failFromReaderThread(const std::string &reason);
     void detachReaderHandleIfCurrentThread();
 
     RpcTimeoutManager timeout_manager_;
-
 public:
     template <typename Response, typename Request>
     std::future<RpcFutureResult<Response>> CallMethodFuture(
