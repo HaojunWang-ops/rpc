@@ -5,3 +5,4 @@ build-asan
 build-debug
 build-tsan
 .vscode
+test.sh
