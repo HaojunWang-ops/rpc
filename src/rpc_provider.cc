@@ -13,12 +13,19 @@
 
 RpcProvider::RpcProvider(size_t threadNum)
     :threadNum_(threadNum),
-     business_thread_pool_(ThreadPool(threadNum_))
+     business_thread_pool_(ThreadPool(threadNum_)),
+     running_(false)
 {
 }
 
 void RpcProvider::NotifyService(google::protobuf::Service *service)
 {
+    if (running_.load(std::memory_order_acquire))
+    {
+        LOG_ERROR << "NotifyService is not allowed after RpcProvider::Run()";
+        return;
+    }
+
     const google::protobuf::ServiceDescriptor *service_desc = service->GetDescriptor();
 
     struct ServiceInfo serviceinfo;
@@ -274,6 +281,8 @@ void RpcProvider::Run(const std::string &ip, uint16_t port)
             this->onMessage(conn, buffer, receive_time);
         });
     
+    running_.store(true, std::memory_order_release);
+
     business_thread_pool_.start();
     server.start();
     loop.loop();

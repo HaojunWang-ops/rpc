@@ -14,6 +14,7 @@
 
 #include <unordered_map>
 #include <string>
+#include <atomic>
 
 class RpcProvider
 {
@@ -63,6 +64,8 @@ private:
     };
 
     std::unordered_map<std::string, ServiceInfo> service_map_;
+
+    std::atomic<bool> running_;
 
     size_t threadNum_;
     ThreadPool business_thread_pool_;
