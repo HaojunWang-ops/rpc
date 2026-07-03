@@ -19,6 +19,12 @@ void RpcTimeoutManager::start()
         {
             return;
         }
+
+        while (!heap_.empty())
+        {
+            heap_.pop();
+        }
+
         running_ .store(true, std::memory_order_release);
         worker_ = std::thread(&RpcTimeoutManager::loop, this);
     }
