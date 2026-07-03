@@ -71,3 +71,15 @@ public:
 private:
     std::shared_ptr<State> state_;
 };
+
+/*
+1. Future destruction does not cancel the RPC.
+2. RPC completion is independent of whether the user calls get().
+3. If the channel/pool stops before response arrives, the future becomes ready with controller failed / exception / error result.
+4. Timeout completion may happen on timeout manager thread.
+5. Normal response completion may happen on reader thread or callback executor thread, depending on implementation.
+6.Future API owns the request, response and controller inside FutureCallState.
+The caller does not need to keep external request/response/controller objects alive after submitting a future call.
+Destroying the returned future does not cancel the RPC.
+The internal FutureCallState is kept alive by the pending call / completion closure until the RPC finishes, times out, or is failed by channel stop.
+*/
