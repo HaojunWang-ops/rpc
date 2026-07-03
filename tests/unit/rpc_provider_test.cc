@@ -95,6 +95,31 @@ TEST(RpcProviderTest, NotifyServiceBeforeRunRegistersServiceAndMethods)
               demo::UserService::descriptor()->FindMethodByName("Register"));
 }
 
+TEST(RpcProviderTest, NotifyNullServiceDoesNotMutateRegistry)
+{
+    RpcProvider provider(1);
+
+    provider.NotifyService(nullptr);
+
+    EXPECT_TRUE(provider.service_map_.empty());
+}
+
+TEST(RpcProviderTest, NotifyDuplicateServiceDoesNotReplaceExistingService)
+{
+    RpcProvider provider(1);
+    TestUserService first_service;
+    TestUserService second_service;
+
+    provider.NotifyService(&first_service);
+    provider.NotifyService(&second_service);
+
+    auto service_it = provider.service_map_.find("demo.UserService");
+    ASSERT_NE(service_it, provider.service_map_.end());
+    EXPECT_EQ(provider.service_map_.size(), 1u);
+    EXPECT_EQ(service_it->second.service, &first_service);
+    EXPECT_EQ(service_it->second.method_map.size(), 2u);
+}
+
 TEST(RpcProviderTest, RegisteredMethodDescriptorDispatchesToService)
 {
     RpcProvider provider(1);
