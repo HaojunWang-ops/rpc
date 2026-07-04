@@ -448,6 +448,53 @@ TEST(RpcChannelPoolTest, StopWhileAsyncCallsInFlightShouldDrainDoneOnce)
     server.stop();
 }
 
+TEST(RpcChannelPoolTest, StopFromCallbackWorkerShouldBeIgnoredAndKeepPoolRunning)
+{
+    ControlledTcpServer server(0, buildLoginResponseBody);
+    ASSERT_TRUE(server.start());
+
+    RpcChannelPool pool("127.0.0.1", server.port(), 1);
+    ASSERT_TRUE(pool.start());
+    ASSERT_TRUE(server.waitForAcceptCount(1, std::chrono::seconds(1)));
+
+    demo::UserService_Stub stub(&pool);
+    auto request = std::make_shared<demo::LoginRequest>(makeLoginRequest());
+    auto response = std::make_shared<demo::LoginResponse>();
+    auto controller = std::make_shared<SimpleRpcController>();
+
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done_ran = false;
+    bool callback_saw_failure = false;
+
+    auto* done = SendResponseClosure(
+        [&pool, request, response, controller, &mutex, &cv,
+         &done_ran, &callback_saw_failure] {
+            pool.stop();
+
+            std::lock_guard<std::mutex> lock(mutex);
+            done_ran = true;
+            callback_saw_failure = controller->Failed();
+            cv.notify_all();
+        });
+
+    stub.Login(controller.get(), request.get(), response.get(), done);
+
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        ASSERT_TRUE(cv.wait_for(lock, std::chrono::seconds(1), [&] {
+            return done_ran;
+        }));
+    }
+
+    EXPECT_FALSE(callback_saw_failure);
+    EXPECT_TRUE(doOnePoolLoginCall(pool));
+
+    pool.stop();
+    ASSERT_TRUE(server.waitForActiveConnections(0, std::chrono::seconds(1)));
+    server.stop();
+}
+
 TEST(RpcChannelPoolTest, ConcurrentRepairAndStopShouldNotLeakConnections)
 {
     ControlledTcpServer server(0, buildLoginResponseBody);
