@@ -1,5 +1,7 @@
 #include "rpc_timeout_manager.h"
 
+#include "Logging.h"
+
 RpcTimeoutManager::RpcTimeoutManager(TimeoutCallback cb)
     : on_timeout_(std::move(cb))
 {
@@ -50,8 +52,19 @@ void RpcTimeoutManager::stop()
 
 void RpcTimeoutManager::add(uint64_t request_id, std::chrono::milliseconds timeout)
 {
+    if (!running_.load(std::memory_order_acquire))
+    {
+        LOG_ERROR << "RpcTimeoutManager is not ready";
+        return;
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
 
+    if (timeout.count() < 0)
+    {
+        LOG_ERROR << "timeout < 0";
+        return;
+    }
     struct TimeoutItem item;
     item.request_id = request_id;
     item.deadline = Clock::now() + timeout;

@@ -54,6 +54,12 @@ MyRpcChannel::~MyRpcChannel()
 
 void MyRpcChannel::setTimeoutMs(int timeout_ms)
 {
+    if (timeout_ms < 0)
+    {
+        LOG_ERROR << "timeout_ms < 0";
+        return;
+    }
+
     timeout_ms_.store(timeout_ms, std::memory_order_release);
 }
 
