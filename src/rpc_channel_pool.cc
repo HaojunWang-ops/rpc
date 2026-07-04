@@ -67,6 +67,12 @@ bool RpcChannelPool::start()
 
 void RpcChannelPool::stop()
 {
+    if (callback_executor_->isInWorkerThread())
+    {
+        LOG_ERROR << "RpcChannelPool::stop() must not be called from CallbackExecutor worker thread";
+        return;
+    }
+    
     std::shared_ptr<ChannelList> old_snapshot;
     {
         std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);

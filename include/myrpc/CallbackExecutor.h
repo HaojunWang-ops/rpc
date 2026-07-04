@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Logging.h"
+#include "CountDownLatch.h"
 
 #include <condition_variable>
 #include <exception>
@@ -8,6 +9,7 @@
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <memory>
 
 class CallbackExecutor
 {
@@ -19,8 +21,8 @@ public:
         stop();
     }
 
-    CallbackExecutor(const CallbackExecutor&) = delete;
-    CallbackExecutor& operator=(const CallbackExecutor&) = delete;
+    CallbackExecutor(const CallbackExecutor &) = delete;
+    CallbackExecutor &operator=(const CallbackExecutor &) = delete;
 
     void start()
     {
@@ -33,23 +35,27 @@ public:
 
         stopping_ = false;
 
-        worker_ = std::thread([this]() {
-            this->runInLoop();
-        });
+        auto start_latch = std::make_shared<reactor::CountDownLatch>(1);
+        worker_ = std::thread([this, start_latch]()
+                              { this->runInLoop(start_latch); });
+
+        start_latch->wait();
+
+        worker_thread_tid_ = worker_.get_id();
 
         started_ = true;
     }
 
     void stop()
     {
-        if (worker_.joinable() &&
-            worker_.get_id() == std::this_thread::get_id())
-        {
-            std::terminate();
-        }
-
         {
             std::lock_guard<std::mutex> lock(mutex_);
+
+            if (started_ && worker_thread_tid_ == std::this_thread::get_id())
+            {
+                LOG_ERROR << "CallbackExecutor::stop() cannot be called from worker thread";
+                return;
+            }
 
             if (!started_ || stopping_)
             {
@@ -70,6 +76,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             started_ = false;
             stopping_ = false;
+            worker_thread_tid_ = std::thread::id{};
         }
     }
 
@@ -95,9 +102,16 @@ public:
         return true;
     }
 
-private:
-    void runInLoop()
+    bool isInWorkerThread() const
     {
+        return worker_.joinable() && std::this_thread::get_id() == worker_thread_tid_;
+    }
+
+private:
+    void runInLoop(const std::shared_ptr<reactor::CountDownLatch> &latch)
+    {
+        latch->countDown();
+
         while (true)
         {
             std::function<void()> task;
@@ -105,9 +119,8 @@ private:
             {
                 std::unique_lock<std::mutex> lock(mutex_);
 
-                cv_.wait(lock, [this]() {
-                    return stopping_ || !tasks_.empty();
-                });
+                cv_.wait(lock, [this]()
+                         { return stopping_ || !tasks_.empty(); });
 
                 if (stopping_ && tasks_.empty())
                 {
@@ -138,4 +151,6 @@ private:
     bool stopping_ = false;
 
     std::thread worker_;
+
+    std::thread::id worker_thread_tid_ = std::thread::id{};
 };
