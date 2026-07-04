@@ -11,6 +11,14 @@
 #include <unistd.h>
 #include <iostream>
 
+namespace
+{
+    static constexpr uint32_t kHeaderSizeFieldBytes = 4;
+    
+    static constexpr uint32_t kMaxResponseFrameSize = 64 * 1024 * 1024;
+    static constexpr uint32_t kMaxResponseHeaderSize = 1024 * 1024;
+}
+
 RpcProvider::RpcProvider(size_t threadNum)
     :threadNum_(threadNum),
      business_thread_pool_(ThreadPool(threadNum_)),
@@ -73,7 +81,7 @@ void RpcProvider::doRpcTask(const reactor::net::TcpConnectionPtr& conn,
         ::memcpy(&header_size, data, sizeof(header_size));
         header_size = ::ntohl(header_size);
         
-        if (total_size < 4 + header_size)
+        if (total_size < kHeaderSizeFieldBytes + header_size)
         {
             controller->SetFailed(myrpc::RPC_BAD_REQUEST, "total_size < 4 + header_size");
             SendRpcError(conn, 0, controller);
@@ -81,6 +89,22 @@ void RpcProvider::doRpcTask(const reactor::net::TcpConnectionPtr& conn,
             return;
         }
 
+        if (total_size > kMaxResponseFrameSize)
+        {
+            controller->SetFailed(myrpc::RPC_BAD_REQUEST, "total_size is too large");
+            SendRpcError(conn, 0, controller);
+            conn->shutdown();
+            return;
+        }
+
+        if (header_size > kMaxResponseHeaderSize)
+        {
+            controller->SetFailed(myrpc::RPC_BAD_REQUEST, "header_size is too large");
+            SendRpcError(conn, 0, controller);
+            conn->shutdown();
+            return;
+        }
+        
         std::string header_str(data + 4, header_size);
 
         myrpc::RpcHeader header;
