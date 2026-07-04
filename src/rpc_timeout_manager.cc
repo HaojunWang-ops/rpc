@@ -22,11 +22,6 @@ void RpcTimeoutManager::start()
             return;
         }
 
-        while (!heap_.empty())
-        {
-            heap_.pop();
-        }
-
         running_ .store(true, std::memory_order_release);
         worker_ = std::thread(&RpcTimeoutManager::loop, this);
     }
@@ -41,6 +36,12 @@ void RpcTimeoutManager::stop()
         {
             return;
         }
+
+        while (!heap_.empty())
+        {
+            heap_.pop();
+        }
+
         running_.store(false, std::memory_order_release);
         cv_.notify_all();
     }
@@ -52,13 +53,12 @@ void RpcTimeoutManager::stop()
 
 void RpcTimeoutManager::add(uint64_t request_id, std::chrono::milliseconds timeout)
 {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (!running_.load(std::memory_order_acquire))
     {
         LOG_ERROR << "RpcTimeoutManager is not ready";
         return;
     }
-
-    std::lock_guard<std::mutex> lock(mutex_);
 
     if (timeout.count() < 0)
     {

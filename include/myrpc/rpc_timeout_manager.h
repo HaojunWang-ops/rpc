@@ -73,3 +73,8 @@ RPC timeout starts after request frame is written successfully.
 It does not cover blocking socket write.
 If write blocks indefinitely, timeout may not fire until write returns or the channel is stopped.
 */
+
+/*
+RpcTimeoutManager uses lazy timeout cleanup. Completed calls do not remove their timeout entries immediately. 
+When a stale timeout expires, it is ignored because the corresponding pending call has already been removed.
+*/
