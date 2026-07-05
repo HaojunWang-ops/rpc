@@ -6,3 +6,4 @@ build-debug
 build-tsan
 .vscode
 test.sh
+build-release

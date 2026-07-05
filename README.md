@@ -57,6 +57,7 @@ ctest --test-dir build-tsan --output-on-failure
 ctest --test-dir build-debug --output-on-failure
 57/57 tests passed
 ```
+测试数量会随开发变化，以上结果表示当前提交下的本地 Debug 验证结果。并发或生命周期相关修改合入前，应同时运行 Debug、ASAN 和 TSAN。
 
 ## 运行示例
 
@@ -129,8 +130,8 @@ if (!result.ok) {
 }
 ```
 
-Future 调用会通过 `FutureCallState` 持有内部 request、response、controller、promise 和完成闭包。提交 future 调用后，调用者不需要继续保持外部 request/response/controller 对象存活。
-
+- Future 调用会通过 `FutureCallState` 持有内部 request、response、controller、promise 和完成闭包。提交 future 调用后，调用者不需要继续保持外部 request/response/controller 对象存活。
+- 销毁返回的 future 不会取消 RPC；FutureCallState 会由 pending call / completion closure 保持存活，直到调用正常完成、超时或因 channel stop 失败。
 ## 线路协议
 
 客户端请求帧：
@@ -169,9 +170,12 @@ response body
 
 当前协议限制：
 
-- 客户端响应帧最大 64 MiB
-- 客户端响应头最大 1 MiB
-- 服务端请求帧最大 64 MiB
+| 方向 | 限制 | 当前值 |
+|---|---:|---:|
+| client response frame | max total frame size | 64 MiB |
+| client response header | max header size | 1 MiB |
+| server request frame | max total frame size | 64 MiB |
+| server request header | max header size | 1 MiB |
 
 除非明确要做协议迁移，否则不要改变以上布局。
 
@@ -205,14 +209,15 @@ response body
 4. `doRpcTask()` 运行在业务线程。它解析 `RpcHeader`，校验 service/method/body size，构造 protobuf request/response 对象，并调用注册的 protobuf service。
 5. service 实现必须恰好调用一次 `done->Run()`。该闭包序列化并发送正常响应或错误响应。
 
-服务端限制：
+服务端使用规则：
 
-- `Run()` 没有对应的公开 stop API。
-- service registry 启动后没有锁保护，设计假设所有注册都发生在 `Run()` 之前。
-- `NotifyService(nullptr)` 没有保护，会解引用空指针。
-- 重复注册同名 service 不会报错，`unordered_map::emplace()` 会保留第一次注册。
-- service 如果不调用 `done->Run()`，该 RPC 不会返回响应。
-- service 如果多次调用 `done->Run()`，会违反闭包所有权并导致未定义行为。
+- 服务必须在 Run() 之前注册。
+- NotifyService(nullptr) 会失败。
+- 重复注册同名 service 会失败。
+- RpcProvider 只保存服务对象裸指针，不拥有服务对象。
+- 注册的服务对象必须比 Run() 存活更久。
+- Run() 会阻塞在 mini_muduo 事件循环中。
+- 当前没有公开的 RpcProvider::Stop() API。
 
 ## 所有权与生命周期
 
@@ -292,9 +297,8 @@ channel 停止语义的薄弱点：
 
 - 销毁 `RpcChannelPool` 与任意 pool 公开方法并发。
 - 销毁 `MyRpcChannel` 与仍可能持有或获取该 channel 的调用并发。
-- RPC 完成线程写入 `SimpleRpcController` 时，用户线程同时读取或写入同一个 controller。
+- SimpleRpcController 是轻量状态容器，不提供跨线程同步语义。同步调用中，用户应在 CallMethod() 返回后读取；普通异步调用中，用户应在 done 运行后读取；future 调用中，用户不直接访问内部 controller。不要在 RPC 未完成时从其他线程轮询、修改或复用同一个 controller。
 - 普通异步调用的 `done` 运行前，修改或销毁 protobuf request/response/controller。
-- `Run()` 后继续注册 provider service。
 - 直接使用 `RpcTransport` 时，`close()` 与 `readN()`/`writeN()` 并发，除非遵循 channel 的停止、shutdown、写序列化和 close 顺序。
 
 锁和发布关系：
@@ -357,7 +361,8 @@ timeout manager 资源行为：
 - 当前没有逐请求取消 timeout 的机制。
 - 成功完成的调用仍会在 timeout heap 中留下条目，直到 deadline 到期。
 - 高 QPS 且 timeout 很长时，heap 大小可能接近 timeout 窗口内已经完成的调用数。
-- `RpcTimeoutManager::stop()` 会停止 worker 线程；遗留 heap 条目会在下一次 `start()` 时清理。
+- `RpcTimeoutManager::stop()` 会停止 worker 线程，并清空尚未触发的timeout heap条目。
+- `RpcTimeoutManager::add()` 在 manager 已停止时会拒绝新条目。
 - `RpcTimeoutManager::add()` 当前即使 manager 已停止也会接受条目。
 
 transport 行为：
@@ -395,19 +400,16 @@ transport 行为：
 
 新增错误路径时必须保持：已接受的异步调用中，`done` 恰好运行一次。
 
-## 已知不够健壮的地方
+## 当前限制与后续计划
 
 以下是当前实现中最值得优先加固的点：
 
 - `RpcProvider` 没有优雅停止 API，`Run()` 阻塞后只能依赖底层 event loop 退出或进程结束。
 - `RpcChannelPool::stop()` 不是并发 repair 的完整屏障，也不会等待另一个正在执行的 stop 完成。
-- 从 callback executor worker 内调用 `RpcChannelPool::stop()` 会触发 `CallbackExecutor::stop()` 的自 join 防护并终止进程。
 - RPC timeout 不覆盖阻塞写，只覆盖 `WriteN()` 返回并注册 timer 之后的等待阶段。
 - 成功响应不会取消 timeout 条目，高吞吐和长 timeout 下 timeout heap 会增长。
 - `SimpleRpcController` 内部没有锁，除了框架完成前、用户观察后的顺序使用外，不应并发读写。
 - provider 信任业务 service 恰好调用一次 `done`，框架不防御漏调或重复调用。
-- `NotifyService()` 没有空 service 防护，也没有重复注册反馈。
-- connect timeout 和 RPC timeout setter 没有输入范围校验。
 - 直接使用 `MyRpcChannel` 且 callback executor 为空或已停止时，用户 callback 可能在内部线程 inline 运行。
 
 建议修复顺序：
@@ -417,9 +419,7 @@ transport 行为：
 3. 支持从 callback 上请求异步关闭，而不是在 callback worker 上直接 stop executor。
 4. 为 timeout manager 增加取消或 generation/table 机制。
 5. 将 request timeout 覆盖到写入阶段，或增加独立 send timeout。
-6. 校验 timeout 配置输入。
-7. 增加 provider 注册校验和重复 service 报告。
-8. 增加 callback 中 stop、并发 double stop、repair 期间析构、高 QPS timeout heap 等测试。
+6. 增加 callback 中 stop、并发 double stop、repair 期间析构、高 QPS timeout heap 等测试。
 
 ## 测试覆盖
 

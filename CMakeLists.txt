@@ -9,6 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(MYRPC_BUILD_EXAMPLES "Build examples" ON)
 option(MYRPC_BUILD_TESTS "Build tests" ON)
+option(MYRPC_BUILD_BENCHMARKS "Build my_rpc benchmarks" OFF)
 option(MYRPC_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(MYRPC_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 
@@ -223,6 +224,11 @@ if (MYRPC_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+if (MYRPC_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
+endif()
+
 
 #[[
 third_party/mini_muduo
