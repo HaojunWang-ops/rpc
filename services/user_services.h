@@ -16,9 +16,9 @@ public:
                demo::LoginResponse *response,
                google::protobuf::Closure *done) override
     {
-        std::cout << "UserServiceImpl::Login called\n";
-        std::cout << "name = " << request->name() << "\n";
-        std::cout << "password = " << request->password() << std::endl;
+        //std::cout << "UserServiceImpl::Login called\n";
+        //std::cout << "name = " << request->name() << "\n";
+        //std::cout << "password = " << request->password() << std::endl;
 
         if (request->name().empty()){
             response->set_code(1);
@@ -52,10 +52,10 @@ public:
                   demo::RegisterResponse *response, 
                   google::protobuf::Closure *done) override
     {
-        std::cout << "UserServiceImpl::Register called\n";
-        std::cout << "name = " << request->name() << "\n";
+        //std::cout << "UserServiceImpl::Register called\n";
+        //std::cout << "name = " << request->name() << "\n";
         //如果endl，内容很可能在缓冲区，输出不出来
-        std::cout << "password= " << request->password() << std::endl;
+        //std::cout << "password= " << request->password() << std::endl;
 
         if (request->name().empty()){
             response->set_code(1);

@@ -121,9 +121,11 @@ endfunction()
 
 add_myrpc_test(rpc_channel_pool_test integration/rpc_channel_pool_test.cc integration)
 add_myrpc_test(threadpool_test unit/threadpool_test.cc unit)
+add_myrpc_test(callback_executor_test unit/callback_executor_test.cc unit)
 add_myrpc_test(pending_call_manager_test unit/pending_call_manager_test.cc unit)
 add_myrpc_test(rpc_codec_test unit/rpc_codec_test.cc unit)
 add_myrpc_test(rpc_provider_test unit/rpc_provider_test.cc unit)
+add_myrpc_test(rpc_timeout_manager_test unit/rpc_timeout_manager_test.cc unit)
 add_myrpc_test(rpc_transport_test unit/rpc_transport_test.cc unit)
 
 add_myrpc_test(bad_packet_test integration/bad_packet_test.cc integration)

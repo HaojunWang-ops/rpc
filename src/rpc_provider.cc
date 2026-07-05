@@ -224,9 +224,9 @@ void RpcProvider::onMessage(const reactor::net::TcpConnectionPtr &conn,
 
         business_thread_pool_.submit([this, conn, request_frame = std::move(request_frame)]() mutable{
             doRpcTask(conn, std::move(request_frame));
-            std::cout << "[business thread] id = "
-                << std::this_thread::get_id()
-                << std::endl;
+            //std::cout << "[business thread] id = "
+                //<< std::this_thread::get_id()
+                //<< std::endl;
         });
 
 
