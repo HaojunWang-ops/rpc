@@ -19,6 +19,6 @@ function(add_myrpc_benchmark target_name source_file)
 endfunction()
 
 add_myrpc_benchmark(rpc_sync_single_benchmark rpc_sync_single_benchmark.cc)
-
-
-
+add_myrpc_benchmark(rpc_pool_size_benchmark rpc_pool_size_benchmark.cc)
+add_myrpc_benchmark(rpc_sync_threads_benchmark rpc_sync_threads_benchmark.cc)
+add_myrpc_benchmark(rpc_async_callback_benchmark rpc_async_callback_benchmark.cc)
