@@ -40,6 +40,8 @@ bool RpcChannelPool::start()
     for (size_t i = 0; i < pool_size_; i++)
     {
         auto ch = MyRpcChannel::create(ip_, port_, callback_executor_.get());
+        ch->setTimeoutMs(timeout_ms_);
+
         if (!ch->start())
         {
             for (auto &opened : (*new_channels))
@@ -161,6 +163,8 @@ bool RpcChannelPool::repairChannel(size_t index)
     }
 
     auto new_ch = MyRpcChannel::create(ip_, port_, callback_executor_.get());
+    new_ch->setTimeoutMs(timeout_ms_);
+
     if (!new_ch->start())
     {
         return false;
@@ -220,7 +224,8 @@ bool RpcChannelPool::repairChannelInCopy(ChannelList &new_channels,
     } 
 
     auto new_ch = MyRpcChannel::create(ip_, port_, callback_executor_.get());
-
+    new_ch->setTimeoutMs(timeout_ms_);
+    
     if (!new_ch->start())
     {
         new_channels[index] = std::move(old_ch);
@@ -437,4 +442,9 @@ void RpcChannelPool::leaveCall()
     }
 
     lifecycle_cv_.notify_all();
+}
+
+void RpcChannelPool::setTimeoutMs(int timeout_ms)
+{
+    timeout_ms_ = timeout_ms;
 }

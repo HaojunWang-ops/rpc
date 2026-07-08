@@ -61,6 +61,7 @@ public:
 
     bool isRunning() const;
 
+    void setTimeoutMs(int timeout_ms);
 private:
     std::string ip_;
     uint16_t port_;
@@ -83,6 +84,7 @@ private:
 
     int active_calls_{0};
 
+    int timeout_ms_ = 3000;
 private:
     bool repairChannel(size_t index);
     bool repairChannelInCopy(ChannelList &new_channels,
