@@ -19,6 +19,7 @@
 - `proto/`：演示 protobuf 服务定义。
 - `services/`：演示 `UserService` 实现。
 - `examples/`：provider 和 consumer 示例程序。
+- `benchmarks/`：同步、连接池、异步 callback、future 和 payload 大小相关基准程序。
 - `tests/unit/`：codec、pending-call、provider、transport 和 thread-pool 单元测试。
 - `tests/integration/`：端到端 RPC、连接丢失、超时、连接池、future、坏包和 TCP 分片测试。
 - `third_party/mini_muduo/`：内置 reactor/network 库。
@@ -51,6 +52,13 @@ ctest --test-dir build-tsan --output-on-failure
 
 `MYRPC_ENABLE_ASAN` 和 `MYRPC_ENABLE_TSAN` 互斥。
 
+Benchmark 构建建议使用 Release，并显式打开 `MYRPC_BUILD_BENCHMARKS`：
+
+```bash
+cmake -S . -B build-benchmark -DCMAKE_BUILD_TYPE=Release -DMYRPC_BUILD_BENCHMARKS=ON
+cmake --build build-benchmark -j
+```
+
 当前 Debug 验证结果：
 
 ```text
@@ -74,6 +82,53 @@ ctest --test-dir build-debug --output-on-failure
 ```
 
 演示服务定义在 `proto/user.proto`，实现位于 `services/user_services.h`。
+
+## 性能基准
+
+所有 benchmark 都是客户端程序，需要先启动 provider：
+
+```bash
+./build-benchmark/examples/provider warn
+```
+
+当前示例 provider 在 `examples/provider_main.cc` 中固定使用 `RpcProvider provider(4)`，因此 benchmark 输出里的 `Provider Workers` 是结果标签，默认值为 4；它不会通过 benchmark 命令行参数修改服务端 worker 数。需要测试其他服务端 worker 数时，应启动对应配置的 provider。
+
+benchmark 默认连接 `127.0.0.1:8000`，默认 RPC timeout 为 3000 ms，timeout 当前没有命令行参数。`warmup_count` 只用于预热，不计入最终统计。
+
+### Benchmark 目标
+
+| 目标 | 覆盖内容 | 默认扫描维度 | 参数 |
+|---|---|---|---|
+| `rpc_sync_single_benchmark` | 单 TCP channel、同步 `Login` 小包串行调用 | 无，单配置 | `[ip] [port] [request_count] [warmup_count]` |
+| `rpc_pool_size_benchmark` | 固定客户端线程数，比较不同连接池大小下的同步 `Login` | pool size: `1, 2, 4, 8, 16` | `[ip] [port] [total_requests] [client_threads] [warmup_count]` |
+| `rpc_sync_threads_benchmark` | 固定连接池大小，比较不同客户端线程数下的同步 `Login` | client threads: `1, 2, 4, 8, 16, 32` | `[ip] [port] [total_requests] [pool_size] [warmup_count]` |
+| `rpc_async_callback_benchmark` | 异步 callback 风格 `Login`，比较最大在途请求数 | max inflight: `10, 50, 100, 200, 500, 1000` | `[ip] [port] [total_requests] [pool_size] [client_threads] [warmup_count]` |
+| `rpc_future_benchmark` | future 风格 `Login`，比较最大在途请求数 | max inflight: `10, 50, 100, 200, 500, 1000` | `[ip] [port] [total_requests] [pool_size] [client_threads] [warmup_count]` |
+| `rpc_payload_size_benchmark` | 同步 `Register`，把 payload 放入 `password` 字段，比较请求体大小影响 | payload: `16 B, 128 B, 1 KiB, 4 KiB, 16 KiB, 64 KiB, 256 KiB, 1 MiB` | `[ip] [port] [total_requests] [pool_size] [client_threads] [warmup_count]` |
+
+示例命令：
+
+```bash
+./build-benchmark/benchmarks/rpc_sync_single_benchmark 127.0.0.1 8000 10000 1000
+./build-benchmark/benchmarks/rpc_pool_size_benchmark 127.0.0.1 8000 100000 8 1000
+./build-benchmark/benchmarks/rpc_sync_threads_benchmark 127.0.0.1 8000 100000 4 1000
+./build-benchmark/benchmarks/rpc_async_callback_benchmark 127.0.0.1 8000 100000 4 4 1000
+./build-benchmark/benchmarks/rpc_future_benchmark 127.0.0.1 8000 100000 4 4 1000
+./build-benchmark/benchmarks/rpc_payload_size_benchmark 127.0.0.1 8000 100000 4 4 1000
+```
+
+### 输出指标
+
+同步单 channel benchmark 输出 key/value，其他 benchmark 输出可直接粘贴进 Markdown 的表格。主要指标：
+
+- `Success` / `Failed`：业务响应成功与失败数量；`Login` 和 `Register` 都要求 RPC controller 未失败且响应 `success == true`。
+- `QPS`：客户端完成请求数除以压测阶段墙钟时间。
+- `p50` / `p90` / `p99` / `Max`：客户端侧端到端延迟。同步 benchmark 统计一次 `CallMethod()` 调用耗时；异步 callback 和 future benchmark 统计从提交到完成回调或 future ready 的耗时。
+- `Error Rate`：`Failed / (Success + Failed)`。
+- `Client CPU`：客户端进程 `getrusage(RUSAGE_SELF)` CPU 时间除以墙钟时间；多线程压测时可能超过 100%。
+- `MiB/s`：仅 `rpc_payload_size_benchmark` 输出，按请求 payload 字节数乘以完成请求数计算，不包含 RPC header、protobuf 编码开销和响应流量。
+
+阅读结果时建议固定机器、构建类型、provider worker 数、日志级别和端口占用情况。一次只运行一个 benchmark，避免多个客户端竞争同一个 provider 干扰延迟分位数。
 
 ## 基本用法
 
