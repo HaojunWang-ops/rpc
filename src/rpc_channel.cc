@@ -247,15 +247,22 @@ void MyRpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
         finishEarlyError(controller, done, "duplicate request id");
         return;
     }
-
     
+    if (!timeout_manager_.add(request_id, std::chrono::milliseconds(timeout_ms_)))
+    {
+        auto call = pending_.take(request_id);
+        if (call)
+        {
+            finishCallWithError(call, "add timeout manager error");
+        }
+        return;
+    }
 
     bool write_ok = false;
     {
         std::lock_guard<std::mutex> lock(send_mutex_);
         write_ok = WriteN(send_buf.data(), send_buf.size());
     }
-    timeout_manager_.add(request_id, std::chrono::milliseconds(timeout_ms_));
     // 一定不能在锁里面执行回调
     if (!write_ok)
     {
@@ -272,28 +279,6 @@ void MyRpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
         std::unique_lock<std::mutex> lock(call->mutex);
         call->cv.wait(lock, [&call]()
                       { return call->finished; });
-
-        /*if (!ok)
-        {
-            // 谁能从 pending_ 里 erase 掉这个 request_id，谁拥有这次调用的完成权
-            // 防止出现reader 线程刚刚从 pending_ 里拿走 call，但还没来得及设置 finished，同步线程 wait_for 超时
-            auto timeout_call = pending_.take(request_id);
-
-            if (timeout_call)
-            {
-                if (controller)
-                {
-                    controller->SetFailed("rpc call timeout");
-                }
-                return;
-            }
-
-            std::unique_lock<std::mutex> lock(call->mutex);
-            call->cv.wait(lock, [&call]()
-                          { return call->finished; });
-
-            return;
-        }*/
     }
 }
 
@@ -358,7 +343,7 @@ void MyRpcChannel::handleResponseFrame(const myrpc::RpcResponseHeader header, co
 
     if (!call)
     {
-        LOG_WARN << "pending call not found, request id = " << request_id;
+        LOG_DEBUG << "ignore late or already completed response, request id = " << request_id;
         return;
     }
 

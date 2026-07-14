@@ -22,7 +22,7 @@ public:
     void start();
     void stop();
 
-    void add(uint64_t request_id, std::chrono::milliseconds timeout);
+    bool add(uint64_t request_id, std::chrono::milliseconds timeout);
 private:
     struct TimeoutItem
     {
@@ -69,7 +69,6 @@ private:
 };
 
 /*
-RPC timeout starts after request frame is written successfully.
 It does not cover blocking socket write.
 If write blocks indefinitely, timeout may not fire until write returns or the channel is stopped.
 */

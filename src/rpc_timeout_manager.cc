@@ -51,19 +51,19 @@ void RpcTimeoutManager::stop()
     }
 }
 
-void RpcTimeoutManager::add(uint64_t request_id, std::chrono::milliseconds timeout)
+bool RpcTimeoutManager::add(uint64_t request_id, std::chrono::milliseconds timeout)
 {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!running_.load(std::memory_order_acquire))
     {
-        LOG_ERROR << "RpcTimeoutManager is not ready";
-        return;
+        LOG_DEBUG << "RpcTimeoutManager is not ready";
+        return false;
     }
 
     if (timeout.count() < 0)
     {
         LOG_ERROR << "timeout < 0";
-        return;
+        return false;
     }
     struct TimeoutItem item;
     item.request_id = request_id;
@@ -72,6 +72,7 @@ void RpcTimeoutManager::add(uint64_t request_id, std::chrono::milliseconds timeo
     
     heap_.push(std::move(item));
     cv_.notify_one();
+    return true;
 }
 
 void RpcTimeoutManager::loop()
