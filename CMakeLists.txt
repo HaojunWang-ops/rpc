@@ -8,10 +8,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(MYRPC_BUILD_EXAMPLES "Build examples" ON)
-option(MYRPC_BUILD_TESTS "Build tests" ON)
-option(MYRPC_BUILD_BENCHMARKS "Build my_rpc benchmarks" OFF)
+option(MYRPC_BUILD_TESTS "Build unit and integration tests" ON)
+
+option(MYRPC_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(MYRPC_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(MYRPC_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+option(MYRPC_BUILD_STRESS_TESTS "Build long-running stress tests" OFF)
 
 if (MYRPC_ENABLE_ASAN AND MYRPC_ENABLE_TSAN)
     message(FATAL_ERROR "ASan and TSan cannot be enabled at the same time")
@@ -220,7 +222,7 @@ if (MYRPC_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
-if (MYRPC_BUILD_TESTS)
+if (MYRPC_BUILD_TESTS OR MYRPC_BUILD_STRESS_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
