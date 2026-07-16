@@ -30,10 +30,11 @@ public:
     void resetForStart();
 
     size_t size() const{
+        std::lock_guard<std::mutex> lock(mutex_);
         return pending_.size();
     }
 private:
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     bool accepting_ = false;
     std::unordered_map<uint64_t, std::shared_ptr<PendingCall>> pending_;
 };

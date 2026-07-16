@@ -146,11 +146,14 @@ if (MYRPC_BUILD_TESTS)
     add_myrpc_test(test_tcp_fragment integration/test_tcp_fragment.cc integration)
     add_myrpc_test(future_test integration/future_test.cc integration)
     add_myrpc_test(rpc_channel_race_test integration/rpc_channel_race_test.cc integration)
+    add_myrpc_test(rpc_channel_pool_race_test integration/rpc_channel_pool_race_test.cc integration)
     if (MYRPC_ENABLE_TEST_HOOKS)
         target_compile_definitions(rpc_channel_race_test
                                 PRIVATE
-                                    MYRPC_ENABLE_TEST_HOOKS    
-        )
+                                    MYRPC_ENABLE_TEST_HOOKS)
+        target_compile_definitions(rpc_channel_pool_race_test
+                                PRIVATE
+                                    MYRPC_ENABLE_TEST_HOOKS)       
     endif()                           
 endif()
 

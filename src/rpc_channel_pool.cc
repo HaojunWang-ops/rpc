@@ -262,7 +262,14 @@ void RpcChannelPool::repairDeadChannels()
                                          channels_to_stop,
                                          new_channels_started);
     }
+#ifdef MYRPC_ENABLE_TEST_HOOKS
+    auto hooks = test_hooks_;
 
+    if (changed && hooks && hooks->before_snapshot_publish)
+    {
+        hooks->before_snapshot_publish(new_channels_started);
+    }
+#endif
     bool published = false;
     {
         std::lock_guard<std::mutex> lock(repair_mutex_);

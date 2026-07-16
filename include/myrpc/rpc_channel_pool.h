@@ -17,6 +17,36 @@
 class RpcChannelPool : public google::protobuf::RpcChannel
 {
 public:
+    using ChannelPtr = std::shared_ptr<MyRpcChannel>;
+    using ChannelList = std::vector<ChannelPtr>;
+
+public:
+#ifdef MYRPC_ENABLE_TEST_HOOKS
+    struct TestHooks
+    {
+        std::function<void(const std::vector<std::shared_ptr<MyRpcChannel>>)> before_snapshot_publish; 
+    };
+
+    void setTestHookForTest(std::shared_ptr<TestHooks> hooks)
+    {
+        test_hooks_ = hooks;        
+    }
+
+    size_t snapshotSizeForTest() const
+    {
+        auto snapshot = std::atomic_load_explicit(&channels_snapshot_, std::memory_order_acquire);
+        return snapshot ? snapshot->size() : 0;
+    }
+
+    std::shared_ptr<ChannelList> snapshotForTest() const
+    {
+        return std::atomic_load_explicit(&channels_snapshot_, std::memory_order_acquire);
+    }
+private:
+    std::shared_ptr<TestHooks> test_hooks_;
+#endif
+
+public:
     enum class State
     {
         kStopped,
@@ -59,8 +89,6 @@ public:
 
     size_t unavailableCount() const;
 
-    bool isRunning() const;
-
     void setTimeoutMs(int timeout_ms);
 private:
     std::string ip_;
@@ -72,8 +100,6 @@ private:
 
     std::mutex repair_mutex_; // 保护channels_ 和 next_
 
-    using ChannelPtr = std::shared_ptr<MyRpcChannel>;
-    using ChannelList = std::vector<ChannelPtr>;
 
     std::shared_ptr<ChannelList> channels_snapshot_;
     std::atomic<size_t> next_{0};
