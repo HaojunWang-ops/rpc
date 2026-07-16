@@ -82,7 +82,7 @@ include(GoogleTest)
 # helper
 # ============================================================
 
-function(add_myrpc_test target_name source_file output_subdir)
+function(add_myrpc_test target_name source_file output_subdir test_labels)
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${source_file}")
         add_executable(${target_name}
             ${source_file}
@@ -113,52 +113,46 @@ function(add_myrpc_test target_name source_file output_subdir)
 
         gtest_discover_tests(${target_name}
             DISCOVERY_MODE PRE_TEST
+            PROPERTIES
+                LABELS "${test_labels}"
         )
 
-        if (MYRPC_ENABLE_TEST_HOOKS)
-            target_compile_definitions(${target_name} PRIVATE MYRPC_ENABLE_TEST_HOOKS)
-        endif()                  
     else()
         message(WARNING "Test source not found: ${source_file}, skip target ${target_name}")
     endif()
 endfunction()
 
 if (MYRPC_BUILD_TESTS)
-    add_myrpc_test(rpc_channel_pool_test integration/rpc_channel_pool_test.cc integration)
-    add_myrpc_test(threadpool_test unit/threadpool_test.cc unit)
-    add_myrpc_test(callback_executor_test unit/callback_executor_test.cc unit)
-    add_myrpc_test(pending_call_manager_test unit/pending_call_manager_test.cc unit)
-    add_myrpc_test(rpc_codec_test unit/rpc_codec_test.cc unit)
-    add_myrpc_test(rpc_provider_test unit/rpc_provider_test.cc unit)
-    add_myrpc_test(rpc_timeout_manager_test unit/rpc_timeout_manager_test.cc unit)
-    add_myrpc_test(rpc_transport_test unit/rpc_transport_test.cc unit)
 
-    add_myrpc_test(bad_packet_test integration/bad_packet_test.cc integration)
-    add_myrpc_test(batch_async integration/batch_async.cc integration)
-    add_myrpc_test(connection_lost integration/connection_lost.cc integration)
-    add_myrpc_test(multithread_call integration/multithread_call.cc integration)
-    add_myrpc_test(normal_async integration/normal_async.cc integration)
-    add_myrpc_test(not_connection integration/not_connection.cc integration)
-    add_myrpc_test(rpc_channel_timeout_test integration/rpc_channel_timeout_test.cc integration)
-    add_myrpc_test(request_1000_test integration/request1000_test.cc integration)
-    add_myrpc_test(service_not_found integration/service_not_found.cc integration test_protocol)
-    add_myrpc_test(service_not_found_test integration/service_not_found_test.cc integration)
-    add_myrpc_test(test_tcp_fragment integration/test_tcp_fragment.cc integration)
-    add_myrpc_test(future_test integration/future_test.cc integration)
-    add_myrpc_test(rpc_channel_race_test integration/rpc_channel_race_test.cc integration)
-    add_myrpc_test(rpc_channel_pool_race_test integration/rpc_channel_pool_race_test.cc integration)
-    if (MYRPC_ENABLE_TEST_HOOKS)
-        target_compile_definitions(rpc_channel_race_test
-                                PRIVATE
-                                    MYRPC_ENABLE_TEST_HOOKS)
-        target_compile_definitions(rpc_channel_pool_race_test
-                                PRIVATE
-                                    MYRPC_ENABLE_TEST_HOOKS)       
-    endif()                           
+    add_myrpc_test(threadpool_test unit/threadpool_test.cc unit "unit")
+
+    add_myrpc_test(callback_executor_test unit/callback_executor_test.cc unit "unit")
+    add_myrpc_test(pending_call_manager_test unit/pending_call_manager_test.cc unit "unit")
+    add_myrpc_test(rpc_codec_test unit/rpc_codec_test.cc unit "unit")
+    add_myrpc_test(rpc_provider_test unit/rpc_provider_test.cc unit "unit")
+    add_myrpc_test(rpc_timeout_manager_test unit/rpc_timeout_manager_test.cc unit "unit")
+    add_myrpc_test(rpc_transport_test unit/rpc_transport_test.cc unit "unit")
+
+    add_myrpc_test(rpc_channel_pool_test integration/rpc_channel_pool_test.cc integration "integration")
+    add_myrpc_test(bad_packet_test integration/bad_packet_test.cc integration "integration")
+    add_myrpc_test(batch_async integration/batch_async.cc integration "integration")
+    add_myrpc_test(connection_lost integration/connection_lost.cc integration "integration")
+    add_myrpc_test(multithread_call integration/multithread_call.cc integration "integration")
+    add_myrpc_test(normal_async integration/normal_async.cc integration "integration")
+    add_myrpc_test(not_connection integration/not_connection.cc integration "integration")
+    add_myrpc_test(rpc_channel_timeout_test integration/rpc_channel_timeout_test.cc integration "integration")
+    add_myrpc_test(request_1000_test integration/request1000_test.cc integration "integration")
+    add_myrpc_test(service_not_found integration/service_not_found.cc integration "integration" test_protocol)
+    add_myrpc_test(service_not_found_test integration/service_not_found_test.cc integration "integration")
+    add_myrpc_test(test_tcp_fragment integration/test_tcp_fragment.cc integration "integration")
+    add_myrpc_test(future_test integration/future_test.cc integration "integration")
 endif()
 
+if (MYRPC_BUILD_RACE_TESTS)
+    add_myrpc_test(rpc_channel_race_test integration/rpc_channel_race_test.cc integration "race")
+    add_myrpc_test(rpc_channel_pool_race_test integration/rpc_channel_pool_race_test.cc integration "race")
+endif()
 
 if(MYRPC_BUILD_STRESS_TESTS)
     add_subdirectory(stress)
 endif()
-
