@@ -321,64 +321,78 @@ void runReporter(
     }
 }
 
+bool startsWith(const std::string& value, const std::string& prefix)
+{
+    return value.rfind(prefix, 0) == 0;
+}
+
+std::string valueOf(const std::string& arg, const std::string& prefix)
+{
+    return arg.substr(prefix.size());
+}
+
 StressOptions parseArgs(int argc, char* argv[])
 {
     StressOptions options;
 
-    // 参数：
-    // 1 ip
-    // 2 port
-    // 3 duration_seconds
-    // 4 pool_size
-    // 5 client_threads
-    // 6 max_inflight
-    // 7 timeout_ms
-    // 8 report_interval_seconds
-    // 9 max_requests
-
-    if (argc >= 2)
+    for (int i = 1; i < argc; ++i)
     {
-        options.ip = argv[1];
-    }
-
-    if (argc >= 3)
-    {
-        options.port = static_cast<uint16_t>(std::stoi(argv[2]));
-    }
-
-    if (argc >= 4)
-    {
-        options.duration_seconds = std::stoi(argv[3]);
-    }
-
-    if (argc >= 5)
-    {
-        options.pool_size = std::stoi(argv[4]);
-    }
-
-    if (argc >= 6)
-    {
-        options.client_threads = std::stoi(argv[5]);
-    }
-
-    if (argc >= 7)
-    {
-        options.max_inflight = std::stoi(argv[6]);
-    }
-
-    if (argc >= 8)
-    {
-        options.timeout_ms = std::stoi(argv[7]);
-    }
-
-    if (argc >= 9)
-    {
-        options.report_interval_seconds = std::stoi(argv[8]);
-    }
-
-    if (argc >= 10)
-    {
-        options.max_requests = std::stoll(argv[9]);
+        const std::string arg = argv[i];
+        try
+        {
+            if (startsWith(arg, "--ip="))
+            {
+                options.ip = valueOf(arg, "--ip=");
+            }
+            else if (startsWith(arg, "--port="))
+            {
+                options.port = static_cast<uint16_t>(
+                    std::stoi(valueOf(arg, "--port=")));
+            }
+            else if (startsWith(arg, "--duration-seconds="))
+            {
+                options.duration_seconds = std::stoi(
+                    valueOf(arg, "--duration-seconds="));
+            }
+            else if (startsWith(arg, "--pool_size="))
+            {
+                options.pool_size = std::stoi(valueOf(arg, "--pool_size="));
+            }
+            else if (startsWith(arg, "--client_threads="))
+            {
+                options.client_threads = std::stoi(
+                    valueOf(arg, "--client_threads="));
+            }
+            else if (startsWith(arg, "--max-inflight="))
+            {
+                options.max_inflight = std::stoi(
+                    valueOf(arg, "--max-inflight="));
+            }
+            else if (startsWith(arg, "--timeout-ms="))
+            {
+                options.timeout_ms = std::stoi(valueOf(arg, "--timeout-ms="));
+            }
+            else if (startsWith(arg, "--report-interval-seconds="))
+            {
+                options.report_interval_seconds = std::stoi(
+                    valueOf(arg, "--report-interval-seconds="));
+            }
+            else if (startsWith(arg, "--max-requests="))
+            {
+                options.max_requests = std::stoll(
+                    valueOf(arg, "--max-requests="));
+            }
+            else
+            {
+                std::cerr << "unknown argument: " << arg << '\n';
+            }
+        }
+        catch (const std::exception& ex)
+        {
+            std::cerr << "invalid argument: " << arg
+                      << ", error: " << ex.what() << '\n';
+            throw;
+        }
     }
 
     return options;
