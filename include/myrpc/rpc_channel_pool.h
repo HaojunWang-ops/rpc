@@ -50,7 +50,7 @@ public:
     enum class State
     {
         kStopped,
-        KRunning,
+        kRunning,
         kStopping
     };
 
@@ -167,42 +167,3 @@ public:
         return future;
     }
 };
-
-// Threading model:
-// 1. CallMethod() can be called concurrently.
-// 2. pickChannel() is lock-free with atomic snapshot.
-// 3. repairDeadChannels() is serialized by repair_mutex_.
-// 4. channels_snapshot_ is immutable after publication.
-// 5. Do not modify the vector in-place after publishing it.
-
-/*
-RpcChannelPool owns CallbackExecutor.
-RpcChannelPool owns channels.
-MyRpcChannel does not own CallbackExecutor.
-MyRpcChannel only holds a non-owning pointer/reference to CallbackExecutor.
-RpcChannelPool stops all channels before stopping CallbackExecutor.
-
-
-
-CallbackExecutor lifecycle rule:
-
-CallbackExecutor is owned by RpcChannelPool or a higher-level RpcClient/RpcRuntime.
-MyRpcChannel only posts completion callbacks to it and never stops it.
-
-CallbackExecutor::stop() must be called by the owner thread after all channels
-have been stopped. User callbacks must not call CallbackExecutor::stop().
-If a callback wants to shut down the client or pool, it should request shutdown
-and let the owner perform the actual stop outside the callback worker thread.
-
-规则：
-1. RpcChannelPool owns CallbackExecutor，使用 unique_ptr。
-2. RpcChannelPool owns all MyRpcChannel snapshots。
-3. MyRpcChannel 使用 CallbackExecutor*，不拥有 executor。
-4. MyRpcChannel 不对外暴露。
-5. RpcChannelPool 自己继承 RpcChannel，对外提供 CallMethod。
-6. stop() 后 pool 拒绝所有新调用，并 inline 执行错误 done。
-7. channel stop 发生在 executor stop 之前。
-8. executor stop drain 已投递 callback。
-9. repair 不在锁内 connect/start/stop。
-10. response frame 有最大大小限制。
-*/

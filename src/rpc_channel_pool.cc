@@ -54,7 +54,7 @@ bool RpcChannelPool::start()
             std::memory_order_release);
     }
 
-    pool_state_ = State::KRunning;
+    pool_state_ = State::kRunning;
     
     return true;
 }
@@ -71,7 +71,7 @@ void RpcChannelPool::stop()
     {
         std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
         {
-            if (pool_state_ != State::KRunning)
+            if (pool_state_ != State::kRunning)
             {
                 return;
             }
@@ -422,7 +422,7 @@ bool RpcChannelPool::enterCall()
 {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
 
-    if (pool_state_ != State::KRunning)
+    if (pool_state_ != State::kRunning)
     {
         return false;
     }
