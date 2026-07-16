@@ -18,7 +18,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ libprotobuf-dev protobuf-compiler libgtest-dev
+          sudo apt-get install -y cmake ninja-build g++ libprotobuf-dev protobuf-compiler libgtest-dev libboost-dev
 
       - name: Configure
         run: |
@@ -48,7 +48,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ libprotobuf-dev protobuf-compiler libgtest-dev
+          sudo apt-get install -y cmake ninja-build g++ libprotobuf-dev protobuf-compiler libgtest-dev libboost-dev
 
       - name: Configure
         run: |
@@ -79,7 +79,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ libprotobuf-dev protobuf-compiler libgtest-dev
+          sudo apt-get install -y cmake ninja-build g++ libprotobuf-dev protobuf-compiler libgtest-dev libboost-dev
 
       - name: Configure
         run: |
