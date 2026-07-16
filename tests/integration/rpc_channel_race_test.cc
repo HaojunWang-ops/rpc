@@ -38,6 +38,16 @@ bool startChannel(const std::shared_ptr<MyRpcChannel>& channel, int timeout_ms)
     return channel->start();
 }
 
+std::string buildLoginResponse(const myrpc::RpcHeader&,
+                                const std::string&)
+{
+    demo::LoginResponse response;
+    response.set_code(0);
+    response.set_message("ok");
+    response.set_success(true);
+    return response.SerializeAsString();
+}
+
 class PendingTakeRaceState
 {
 public:
@@ -227,12 +237,7 @@ TEST(RpcChannelRaceTest, TimeoutAndResponseRaceShouldCompleteExactlyOnce)
 {
     using namespace std::chrono_literals;
 
-    ControlledTcpServer server(0, [](
-        const myrpc::RpcHeader&,
-        const std::string&)
-    {
-        return std::string{};
-    });
+    ControlledTcpServer server(0, buildLoginResponse);
 
     ASSERT_TRUE(server.start());
 
@@ -270,6 +275,42 @@ TEST(RpcChannelRaceTest, TimeoutAndResponseRaceShouldCompleteExactlyOnce)
     LambdaClosure done([&]{
         {
             std::lock_guard<std::mutex> lock(done_mutex);
+            ++done_count;  
         }
+        done_cv.notify_all();
     });
+
+    stub.Login(&controller, &request, &response, &done);
+
+    ASSERT_TRUE(race_state->waitUtilBothArrived(2s));
+    
+    race_state->release();
+
+    ASSERT_TRUE(race_state->waitUtilBothAttempted(2s));
+    
+    {
+        std::unique_lock<std::mutex> lock(done_mutex);
+
+        done_cv.wait_for(lock, 2s, [&]{
+            return done_count >= 1;
+        });
+    }
+
+    callback_executor.stop();
+
+    EXPECT_EQ(race_state->successCount(), 1);
+    EXPECT_EQ(race_state->timeoutSuccessCount() + race_state->responseSuccessCount(), 1);
+    EXPECT_EQ(done_count, 1);
+    EXPECT_EQ(channel->pendingSizeForTest(), 0);
+
+    if (race_state->timeoutSuccessCount() == 1)
+    {
+        EXPECT_TRUE(controller.Failed());
+        EXPECT_FALSE(controller.error_text().empty());
+    }
+    else if (race_state->responseSuccessCount() == 1)
+    {
+        EXPECT_FALSE(controller.Failed());
+        EXPECT_TRUE(response.success());
+    }
 }

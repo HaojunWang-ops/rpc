@@ -356,7 +356,7 @@ void MyRpcChannel::handleResponseFrame(const myrpc::RpcResponseHeader header, co
 #endif
     auto call = pending_.take(request_id);
 #ifdef MYRPC_ENABLE_TEST_HOOKS
-    auto hooks = test_hooks_;
+    hooks = test_hooks_;
     if (hooks && hooks->after_pending_take)
     {
         hooks->after_pending_take(
