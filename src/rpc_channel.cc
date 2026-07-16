@@ -101,7 +101,8 @@ void MyRpcChannel::shutdownSocket()
 
 void MyRpcChannel::stop()
 {
-    std::shared_ptr<MyRpcChannel> self = shared_from_this();
+    //User callbacks below may release the last external channel reference
+    [[maybe_unused]] std::shared_ptr<MyRpcChannel> self = shared_from_this();
 
     auto pending = markPendingFailed("stop() is called");
 
@@ -166,6 +167,7 @@ bool MyRpcChannel::start()
 
     auto start_latch = std::make_shared<reactor::CountDownLatch>(1);
 
+    //reader_thread_按照捕获了shared_ptr<MyRpcChannel>，保证channel一直存活到readerInLoop() exits
     std::thread new_reader([self, start_latch]()
                            {
         start_latch->wait();
@@ -247,7 +249,14 @@ void MyRpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
         finishEarlyError(controller, done, "duplicate request id");
         return;
     }
-    
+   
+#ifdef MYRPC_ENABLE_TEST_HOOKS
+    if (test_hooks_ && test_hooks_->after_pending_added)
+    {
+        test_hooks_->after_pending_added(request_id);
+    }
+#endif
+
     if (!timeout_manager_.add(request_id, std::chrono::milliseconds(timeout_ms_)))
     {
         auto call = pending_.take(request_id);
@@ -263,7 +272,7 @@ void MyRpcChannel::CallMethod(const google::protobuf::MethodDescriptor *method,
         std::lock_guard<std::mutex> lock(send_mutex_);
         write_ok = WriteN(send_buf.data(), send_buf.size());
     }
-    // 一定不能在锁里面执行回调
+
     if (!write_ok)
     {
         auto pending = markPendingFailed("send rpc error");
@@ -338,9 +347,25 @@ void MyRpcChannel::handleResponseFrame(const myrpc::RpcResponseHeader header, co
         failFromReaderThread("invalid request id = 0");
         return;
     }
-
+#ifdef MYRPC_ENABLE_TEST_HOOKS
+    auto hooks = test_hooks_;
+    if (hooks && hooks->before_pending_take)
+    {
+        hooks->before_pending_take(PendingTakePath::kResponse, request_id);
+    }
+#endif
     auto call = pending_.take(request_id);
-
+#ifdef MYRPC_ENABLE_TEST_HOOKS
+    auto hooks = test_hooks_;
+    if (hooks && hooks->after_pending_take)
+    {
+        hooks->after_pending_take(
+            PendingTakePath::kResponse,
+            request_id,
+            static_cast<bool>(call)
+        );
+    }
+#endif
     if (!call)
     {
         LOG_DEBUG << "ignore late or already completed response, request id = " << request_id;
@@ -486,7 +511,7 @@ void MyRpcChannel::cleanupStoppedConnection()
 {
     if (isReaderThread())
     {
-        LOG_ERROR << "cleanupStoppedConnection is called int reader thread";
+        LOG_ERROR << "cleanupStoppedConnection is called in reader thread";
         return;
     }
 
@@ -500,8 +525,6 @@ void MyRpcChannel::cleanupStoppedConnection()
 
 void MyRpcChannel::failFromReaderThread(const std::string &reason)
 {
-    auto self = shared_from_this();
-
     auto pending = markPendingFailed(reason);
 
     detachReaderHandleIfCurrentThread();
@@ -525,8 +548,25 @@ void MyRpcChannel::detachReaderHandleIfCurrentThread()
 
 void MyRpcChannel::onRpcTimeout(uint64_t request_id)
 {
+#ifdef MYRPC_ENABLE_TEST_HOOKS
+    auto hooks = test_hooks_;
+    if (hooks && hooks->before_pending_take)
+    {
+        hooks->before_pending_take(
+            PendingTakePath::kTimeout,
+            request_id
+        );
+    }
+#endif
     auto call = pending_.take(request_id);
-
+#ifdef MYRPC_ENABLE_TEST_HOOKS
+    if (hooks && hooks->after_pending_take)
+    {
+        hooks->after_pending_take(PendingTakePath::kTimeout,
+                                   request_id,
+                                   static_cast<bool> (call)); 
+    }
+#endif
     if (!call)
     {
         return;

@@ -26,15 +26,7 @@ bool RpcChannelPool::start()
 
     callback_executor_->start();
     std::shared_ptr<ChannelList> new_channels;
-    {
-        std::lock_guard<std::mutex> lock(repair_mutex_);
-        auto old_snapshot = std::atomic_load_explicit(
-            &channels_snapshot_,
-            std::memory_order_acquire);
-
-        new_channels = std::make_shared<ChannelList>();
-    }
-
+    new_channels = std::make_shared<ChannelList>();
     new_channels->reserve(pool_size_);
 
     for (size_t i = 0; i < pool_size_; i++)

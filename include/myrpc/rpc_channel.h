@@ -19,6 +19,38 @@
 class MyRpcChannel : public google::protobuf::RpcChannel,
                      public std::enable_shared_from_this<MyRpcChannel>
 {
+#ifdef MYRPC_ENABLE_TEST_HOOKS
+public:
+    enum class PendingTakePath
+    {
+        kTimeout,
+        kResponse
+    };    
+
+    struct RpcChannelTestHooks
+    {
+        //请求成功加入pending_后
+        std::function<void(uint64_t request_id)> after_pending_added;
+
+        //调用pending_.take()前
+        std::function<void(PendingTakePath path, uint64_t request_id)> before_pending_take;
+        //调用pending_take()后
+        std::function<void(PendingTakePath path, uint64_t request_id, bool taken)> after_pending_take;
+    };
+
+    void setTestHooksForTest(std::shared_ptr<RpcChannelTestHooks> hooks)
+    {
+        test_hooks_ = std::move(hooks);
+    }
+
+    size_t pendingSizeForTest() const
+    {
+        return pending_.size();
+    }
+
+private:
+    std::shared_ptr<RpcChannelTestHooks> test_hooks_;
+#endif
 public:
     enum class State
     {
@@ -124,6 +156,7 @@ private:
     void detachReaderHandleIfCurrentThread();
 
     RpcTimeoutManager timeout_manager_;
+
 public:
     template <typename Response, typename Request>
     std::future<RpcFutureResult<Response>> CallMethodFuture(

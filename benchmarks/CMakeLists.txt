@@ -13,6 +13,8 @@ function(add_myrpc_benchmark target_name source_file)
             user_proto
             Threads::Threads
         )
+
+        myrpc_apply_sanitizers(${target_name})
     else()
         message(WARNING "benchmark source not found: ${source_file}")
     endif()

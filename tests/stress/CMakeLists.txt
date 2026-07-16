@@ -43,6 +43,8 @@ function(add_myrpc_stress_program target source)
             LABELS "stress"
             TIMEOUT 120
     )
+
+    myrpc_apply_sanitizers(${target})
 endfunction()
 
 add_myrpc_stress_program(

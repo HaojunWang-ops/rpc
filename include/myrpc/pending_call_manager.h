@@ -29,6 +29,9 @@ public:
     void clear();
     void resetForStart();
 
+    size_t size() const{
+        return pending_.size();
+    }
 private:
     std::mutex mutex_;
     bool accepting_ = false;

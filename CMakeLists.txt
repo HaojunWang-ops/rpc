@@ -8,12 +8,13 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(MYRPC_BUILD_EXAMPLES "Build examples" ON)
-option(MYRPC_BUILD_TESTS "Build unit and integration tests" ON)
+option(MYRPC_BUILD_TESTS "Build unit and integration tests" OFF)
 
 option(MYRPC_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(MYRPC_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(MYRPC_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 option(MYRPC_BUILD_STRESS_TESTS "Build long-running stress tests" OFF)
+option(MYRPC_ENABLE_TEST_HOOKS "Enable hooks" OFF)
 
 if (MYRPC_ENABLE_ASAN AND MYRPC_ENABLE_TSAN)
     message(FATAL_ERROR "ASan and TSan cannot be enabled at the same time")
@@ -231,6 +232,13 @@ if (MYRPC_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)
 endif()
 
+if (MYRPC_BUILD_TESTS)
+    set(MYRPC_ENABLE_TEST_HOOKS ON CACHE BOOL "Enable hooks" FORCE)
+endif()
+
+if (MYRPC_ENABLE_TEST_HOOKS)
+    target_compile_definitions(myrpc_core PRIVATE MYRPC_ENABLE_TEST_HOOKS)
+endif()
 
 #[[
 third_party/mini_muduo

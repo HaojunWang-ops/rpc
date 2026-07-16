@@ -85,3 +85,7 @@ TEST(BatchAsyncTest, AllAsyncCallsShouldCompleteExactlyOnce)
     pool.stop();
     server.stop();
 }
+
+/*测试意图：
+发送异步请求， 所有回调都应该complete exactly once，并且都成功完成。
+*/
