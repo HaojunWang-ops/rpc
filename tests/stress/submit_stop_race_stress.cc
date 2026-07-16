@@ -322,6 +322,7 @@ namespace
                 break;
             }
 
+            // repair 与本轮 stop 并发；计数只表示尝试发生。
             pool.repairDeadChannels();
 
             std::lock_guard<std::mutex> lock(ctx.mutex);
@@ -449,6 +450,7 @@ int main(int argc, char *argv[])
             runRepair, std::ref(ctx), std::ref(round_stop), std::ref(pool),
             options.repair_interval_milliseconds);
 
+        // 在提交、断连和 repair 都运行时触发 stop，扩大生命周期竞争窗口。
         std::this_thread::sleep_for(
             std::chrono::milliseconds(options.stop_delay_milliseconds));
 
@@ -463,6 +465,7 @@ int main(int argc, char *argv[])
             submitter.join();
         }
 
+        // stop 返回后，每一轮都必须收束本轮已接受的请求。
         const bool round_drained = waitUntilDrained(
             ctx, std::chrono::milliseconds(std::max(10000, options.timeout_ms * 2)));
         if (!round_drained)

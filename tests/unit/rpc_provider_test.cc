@@ -244,6 +244,7 @@ void expectBadRequestResponse(int fd,
 }
 }
 
+// 新建 provider 不应带有旧服务注册或运行状态。
 TEST(RpcProviderTest, ConstructedProviderStartsStoppedAndEmpty)
 {
     RpcProvider provider(1);
@@ -253,6 +254,7 @@ TEST(RpcProviderTest, ConstructedProviderStartsStoppedAndEmpty)
     EXPECT_TRUE(provider.service_map_.empty());
 }
 
+// Run 前注册应建立 service 与 method descriptor 的分发表。
 TEST(RpcProviderTest, NotifyServiceBeforeRunRegistersServiceAndMethods)
 {
     RpcProvider provider(1);
@@ -270,6 +272,7 @@ TEST(RpcProviderTest, NotifyServiceBeforeRunRegistersServiceAndMethods)
               demo::UserService::descriptor()->FindMethodByName("Register"));
 }
 
+// 空 service 不能污染已有注册表。
 TEST(RpcProviderTest, NotifyNullServiceDoesNotMutateRegistry)
 {
     RpcProvider provider(1);
@@ -279,6 +282,7 @@ TEST(RpcProviderTest, NotifyNullServiceDoesNotMutateRegistry)
     EXPECT_TRUE(provider.service_map_.empty());
 }
 
+// 重复 service 名不能覆盖先前注册的实现。
 TEST(RpcProviderTest, NotifyDuplicateServiceDoesNotReplaceExistingService)
 {
     RpcProvider provider(1);
@@ -295,6 +299,7 @@ TEST(RpcProviderTest, NotifyDuplicateServiceDoesNotReplaceExistingService)
     EXPECT_EQ(service_it->second.method_map.size(), 2u);
 }
 
+// 已注册 method descriptor 必须准确分发到对应 protobuf service。
 TEST(RpcProviderTest, RegisteredMethodDescriptorDispatchesToService)
 {
     RpcProvider provider(1);
@@ -326,6 +331,7 @@ TEST(RpcProviderTest, RegisteredMethodDescriptorDispatchesToService)
     EXPECT_TRUE(response.success());
 }
 
+// provider 进入运行态后不允许再改变服务注册表。
 TEST(RpcProviderTest, NotifyServiceAfterRunStartedDoesNotMutateRegistry)
 {
     RpcProvider provider(1);
@@ -337,6 +343,7 @@ TEST(RpcProviderTest, NotifyServiceAfterRunStartedDoesNotMutateRegistry)
     EXPECT_TRUE(provider.service_map_.empty());
 }
 
+// header_size 超出 frame 剩余空间时必须拒绝，不能继续解析。
 TEST(RpcProviderTest, DoRpcTaskRejectsHeaderSizeLargerThanFrame)
 {
     RpcProvider provider(1);
@@ -355,6 +362,7 @@ TEST(RpcProviderTest, DoRpcTaskRejectsHeaderSizeLargerThanFrame)
                              "total_size < 4 + header_size");
 }
 
+// 即使 frame 自身存在，超出 header 上限也必须拒绝。
 TEST(RpcProviderTest, DoRpcTaskRejectsHeaderSizeAboveLimit)
 {
     RpcProvider provider(1);
@@ -377,6 +385,7 @@ TEST(RpcProviderTest, DoRpcTaskRejectsHeaderSizeAboveLimit)
                              "header_size is too large");
 }
 
+// 服务端对不可信请求帧实施总大小上限。
 TEST(RpcProviderTest, DoRpcTaskRejectsFrameAboveLimit)
 {
     RpcProvider provider(1);
@@ -393,6 +402,7 @@ TEST(RpcProviderTest, DoRpcTaskRejectsFrameAboveLimit)
                              "total_size is too large");
 }
 
+// body 长度不匹配时返回错误，并保留 request id 让客户端匹配失败结果。
 TEST(RpcProviderTest, DoRpcTaskRejectsArgsSizeMismatchAndKeepsRequestId)
 {
     RpcProvider provider(1);

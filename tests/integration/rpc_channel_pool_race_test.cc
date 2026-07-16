@@ -42,6 +42,7 @@ std::string buildLoginResponse(const myrpc::RpcHeader&,
     return response.SerializeAsString();
 }
 
+// 固定 replacement 已启动但未发布时的 stop，防止 stale repair 重新发布 snapshot。
 TEST(RpcChannelPoolRaceTest, RepairPausedBeforePublishThenStopShouldNotRepublishChannel)
 {
     using namespace std::chrono_literals;
@@ -60,6 +61,7 @@ TEST(RpcChannelPoolRaceTest, RepairPausedBeforePublishThenStopShouldNotRepublish
     ASSERT_TRUE(old_channel);
     ASSERT_TRUE(old_channel->isAvailable());
 
+    // 先使快照中的 channel 不可用，repair 才会创建 replacement。
     old_channel->stop();
 
     std::promise<void> reached_publish_point_promise;
@@ -72,6 +74,7 @@ TEST(RpcChannelPoolRaceTest, RepairPausedBeforePublishThenStopShouldNotRepublish
     
     auto hooks = std::make_shared<RpcChannelPool::TestHooks>();
     hooks->before_snapshot_publish = [&](const std::vector<std::shared_ptr<MyRpcChannel>>& new_channels_started){
+        // replacement 已启动但尚未发布；此处让 stop 取得摘除 snapshot 的机会。
         replacements = new_channels_started;
         
         reached_publish_point_promise.set_value();
@@ -97,6 +100,7 @@ TEST(RpcChannelPoolRaceTest, RepairPausedBeforePublishThenStopShouldNotRepublish
 
     ASSERT_FALSE(replacements.empty());
 
+    // stop 先完成，随后释放 repair；repair 不得把 replacement 重新发布。
     pool->stop();
 
     EXPECT_EQ(pool->snapshotSizeForTest(), 0u);

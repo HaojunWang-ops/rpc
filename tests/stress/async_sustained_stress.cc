@@ -233,6 +233,7 @@ bool submitOneAsyncCall(
     demo::UserService_Stub& stub,
     StressContext& ctx)
 {
+    // state 被 done 捕获，保证普通异步 API 所用的 request/response/controller 活到完成回调。
     auto state = std::make_shared<StressCallState>();
     state->request.set_name("haojun");
     state->request.set_password("123456");
@@ -636,6 +637,7 @@ int main(int argc, char* argv[])
         std::chrono::milliseconds(
             std::max(10000, options.timeout_ms * 2));
 
+    // 先验证正常 response/timeout 能自行收束；只有超时才用 stop 强制完成剩余 pending。
     bool drained =
         waitUntilDrained(ctx, normal_drain_timeout);
 

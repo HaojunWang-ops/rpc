@@ -172,6 +172,7 @@ bool sendOversizedResponseFrame(int fd)
 }
 }
 
+// 服务端找不到 service 时，客户端必须得到失败 controller 和一次 done。
 TEST(ServerErrorTest, ServiceNotFoundShouldCallDoneAndSetControllerFailed)
 {
     uint16_t port = 0;
@@ -242,6 +243,7 @@ TEST(ServerErrorTest, ServiceNotFoundShouldCallDoneAndSetControllerFailed)
     server_thread.join();
 }
 
+// 客户端拒绝超大响应帧后，应失败完成当前调用而不影响完成次数。
 TEST(ServerErrorTest, OversizedResponseFrameShouldFailAndCallDoneOnce)
 {
     uint16_t port = 0;

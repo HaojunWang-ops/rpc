@@ -23,6 +23,7 @@ struct AsyncState
 };
 }
 
+// 未 start 的 channel 拒绝异步调用时也必须执行一次 done。
 TEST(NotConnectionTest, AsyncCallBeforeStartShouldFailAndCallDoneOnce)
 {
     CallbackExecutor callbackexecutor;
@@ -59,6 +60,7 @@ TEST(NotConnectionTest, AsyncCallBeforeStartShouldFailAndCallDoneOnce)
     EXPECT_FALSE(state->error_text.empty());
 }
 
+// 未 start 的同步调用必须快速失败，不能等待不存在的 reader/timeout worker。
 TEST(NotConnectionTest, SyncCallBeforeStartShouldFailWithoutBlocking)
 {
     CallbackExecutor callbackexecutor;

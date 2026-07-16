@@ -105,6 +105,7 @@ int openFdCount()
 }
 }
 
+// 成功 connect 后 transport 必须保存可用 fd，供后续 channel I/O 使用。
 TEST(RpcTransportTest, ConnectToLocalListenerSucceedsAndStoresFd)
 {
     LocalTcpListener listener;
@@ -123,6 +124,7 @@ TEST(RpcTransportTest, ConnectToLocalListenerSucceedsAndStoresFd)
     EXPECT_EQ(transport.fd(), -1);
 }
 
+// 不可达地址必须遵守配置的 connect timeout，不能无限阻塞。
 TEST(RpcTransportTest, ConnectToBlackholeAddressUsesConfiguredTimeout)
 {
     constexpr int kTimeoutMs = 50;

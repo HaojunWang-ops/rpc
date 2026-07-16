@@ -78,6 +78,7 @@ size_t heapSize(RpcTimeoutManager& manager)
 }
 }
 
+// timer worker 未运行或已停止时不能接受新 deadline。
 TEST(RpcTimeoutManagerTest, AddBeforeStartAndAfterStopShouldBeRejected)
 {
     TimeoutRecorder recorder;
@@ -104,6 +105,7 @@ TEST(RpcTimeoutManagerTest, AddBeforeStartAndAfterStopShouldBeRejected)
     EXPECT_FALSE(recorder.waitForSize(1, 50ms));
 }
 
+// stop 清空未到期条目，防止旧 timer 在生命周期结束后触发。
 TEST(RpcTimeoutManagerTest, StopShouldClearPendingHeap)
 {
     TimeoutRecorder recorder;
@@ -126,6 +128,7 @@ TEST(RpcTimeoutManagerTest, StopShouldClearPendingHeap)
     EXPECT_FALSE(recorder.waitForSize(1, 50ms));
 }
 
+// 并发 start/stop 必须串行化，最终不遗留 worker 或 heap 状态。
 TEST(RpcTimeoutManagerTest, ConcurrentStartAndStopShouldSerialize)
 {
     TimeoutRecorder recorder;
@@ -182,6 +185,7 @@ TEST(RpcTimeoutManagerTest, ConcurrentStartAndStopShouldSerialize)
     EXPECT_EQ(recorder.size(), 0u);
 }
 
+// 负 timeout 没有有效 deadline 语义，必须被拒绝。
 TEST(RpcTimeoutManagerTest, NegativeTimeoutShouldBeRejected)
 {
     TimeoutRecorder recorder;
@@ -198,6 +202,7 @@ TEST(RpcTimeoutManagerTest, NegativeTimeoutShouldBeRejected)
     manager.stop();
 }
 
+// 每个到期 request id 只触发一次 timeout callback。
 TEST(RpcTimeoutManagerTest, ExpiredTimeoutsShouldInvokeCallbackOnce)
 {
     TimeoutRecorder recorder;
@@ -222,6 +227,7 @@ TEST(RpcTimeoutManagerTest, ExpiredTimeoutsShouldInvokeCallbackOnce)
     EXPECT_EQ(heapSize(manager), 0u);
 }
 
+// restart 不得继承上一次运行留下的 deadline。
 TEST(RpcTimeoutManagerTest, RestartAfterStopShouldStartWithEmptyHeap)
 {
     TimeoutRecorder recorder;

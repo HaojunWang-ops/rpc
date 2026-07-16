@@ -23,6 +23,7 @@ std::string buildLoginResponseBody(const myrpc::RpcHeader&,
 }
 }
 
+// 多线程同步调用共享 pool 时，所有调用必须返回而非因连接竞争挂起。
 TEST(MultithreadCallTest, ConcurrentSyncCallsShouldAllReturn)
 {
     constexpr int kThreadCount = 8;

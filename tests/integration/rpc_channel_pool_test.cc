@@ -84,6 +84,7 @@ static bool doOnePoolLoginCall(RpcChannelPool& pool)
     return !controller.Failed();
 }
 
+// start 成功后应建立与 pool_size 相同数量的持久连接。
 TEST(RpcChannelPoolTest, StartShouldCreateFixedConnections)
 {
         
@@ -100,6 +101,7 @@ TEST(RpcChannelPoolTest, StartShouldCreateFixedConnections)
     server.stop();
 }
 
+// 轮询选择 channel 时，请求应分布到 pool 中的多个连接。
 TEST(RpcChannelPoolTest, RequestsShouldBeDistributedAcrossConnections)
 {
     ControlledTcpServer server(0, buildLoginResponseBody);
@@ -133,6 +135,7 @@ TEST(RpcChannelPoolTest, RequestsShouldBeDistributedAcrossConnections)
     server.stop();
 }
 
+// reader 感知断连后，repair 应替换不可用 channel 并恢复可用连接数。
 TEST(RpcChannelPoolTest, RepairShouldReplaceClosedConnection)
 {
     ControlledTcpServer server(0, buildEmptyResponseBody);
@@ -162,6 +165,7 @@ TEST(RpcChannelPoolTest, RepairShouldReplaceClosedConnection)
     server.stop();
 }
 
+// pool stop 必须关闭 snapshot 中的全部连接。
 TEST(RpcChannelPoolTest, StopShouldCloseAllConnections)
 {
     ControlledTcpServer server(0, buildEmptyResponseBody);
@@ -182,8 +186,10 @@ TEST(RpcChannelPoolTest, StopShouldCloseAllConnections)
     server.stop();
 }
 
+// 断连、repair 与多线程提交并行时，提交路径不能阻塞或崩溃。
 TEST(RpcChannelPoolTest, ConcurrentCallAndRepairShouldNotCrash)
 {
+    // 同时制造断连、repair 和多线程提交，验证提交路径不会因 snapshot 替换而阻塞或崩溃。
     ControlledTcpServer server(0, buildLoginResponseBody);
     ASSERT_TRUE(server.start());
 
@@ -267,6 +273,7 @@ TEST(RpcChannelPoolTest, ConcurrentCallAndRepairShouldNotCrash)
     server.stop();
 }
 
+// stop 后的同步和异步提交都要失败，异步 done 仍只能执行一次。
 TEST(RpcChannelPoolTest, CallAfterStopShouldFailAndCallDoneOnce)
 {
     ControlledTcpServer server(0, buildLoginResponseBody);
@@ -339,6 +346,7 @@ TEST(RpcChannelPoolTest, CallAfterStopShouldFailAndCallDoneOnce)
     server.stop();
 }
 
+// 对端关闭后 pool 应识别无可用连接，并且 stop 不依赖对端继续读写。
 TEST(RpcChannelPoolTest, NoAvailableChannelShouldFailAndStopShouldNotBlock)
 {
     ControlledTcpServer server(0, buildLoginResponseBody);
@@ -372,11 +380,13 @@ TEST(RpcChannelPoolTest, NoAvailableChannelShouldFailAndStopShouldNotBlock)
     stop_future.get();
 }
 
+// stop 面对 in-flight 异步请求时，必须 drain 每个 done 且不重复执行。
 TEST(RpcChannelPoolTest, StopWhileAsyncCallsInFlightShouldDrainDoneOnce)
 {
     constexpr int kPoolSize = 4;
     constexpr int kRequestCount = 20;
 
+    // 服务端先不返回响应，确保 stop() 面对的是仍在 pending 表中的异步请求。
     std::atomic<bool> release_response{false};
     ControlledTcpServer server(0, [&](const myrpc::RpcHeader& header,
                                       const std::string& body) {
@@ -448,6 +458,7 @@ TEST(RpcChannelPoolTest, StopWhileAsyncCallsInFlightShouldDrainDoneOnce)
     server.stop();
 }
 
+// callback worker 内 stop 被拒绝以避免 self-join，pool 应继续可用。
 TEST(RpcChannelPoolTest, StopFromCallbackWorkerShouldBeIgnoredAndKeepPoolRunning)
 {
     ControlledTcpServer server(0, buildLoginResponseBody);
@@ -495,6 +506,7 @@ TEST(RpcChannelPoolTest, StopFromCallbackWorkerShouldBeIgnoredAndKeepPoolRunning
     server.stop();
 }
 
+// 时间驱动地并发 repair/stop，检查连接和后台 repair 线程均能收束。
 TEST(RpcChannelPoolTest, ConcurrentRepairAndStopShouldNotLeakConnections)
 {
     ControlledTcpServer server(0, buildLoginResponseBody);
@@ -504,6 +516,7 @@ TEST(RpcChannelPoolTest, ConcurrentRepairAndStopShouldNotLeakConnections)
     ASSERT_TRUE(pool.start());
     ASSERT_TRUE(server.waitForAcceptCount(4, std::chrono::seconds(1)));
 
+    // 该循环是时间驱动的广覆盖检查；精确的发布/停止交错由 race test 覆盖。
     std::atomic<bool> keep_repairing{true};
     auto repair_worker = std::async(std::launch::async, [&] {
         while (keep_repairing.load(std::memory_order_acquire))
@@ -536,6 +549,7 @@ TEST(RpcChannelPoolTest, ConcurrentRepairAndStopShouldNotLeakConnections)
     server.stop();
 }
 
+// 重复 start/stop 不应重复创建资源、泄漏连接或阻塞调用方。
 TEST(RpcChannelPoolTest, DoubleStartAndDoubleStopShouldBeSafe)
 {
     ControlledTcpServer server(0, buildEmptyResponseBody);

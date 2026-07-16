@@ -80,6 +80,7 @@ bool writeAll(int fd, const void* data, size_t size)
 }
 }
 
+// total_size 连 header_size 字段都容不下时，服务端必须立即拒绝该帧。
 TEST(BadPacketTest, TotalSizeLessThanHeaderSizeFieldShouldBeRejected)
 {
     ControlledTcpServer server(0, emptyResponse);
@@ -99,6 +100,7 @@ TEST(BadPacketTest, TotalSizeLessThanHeaderSizeFieldShouldBeRejected)
     server.stop();
 }
 
+// header 声明超过 frame 内容时，不能把后续字节误解析为 protobuf header。
 TEST(BadPacketTest, HeaderSizeGreaterThanBodyShouldBeRejected)
 {
     ControlledTcpServer server(0, emptyResponse);
@@ -120,6 +122,7 @@ TEST(BadPacketTest, HeaderSizeGreaterThanBodyShouldBeRejected)
     server.stop();
 }
 
+// RpcHeader 的 args_size 与真实 body 不一致时，必须返回协议错误。
 TEST(BadPacketTest, ArgsSizeMismatchShouldBeRejected)
 {
     ControlledTcpServer server(0, emptyResponse);

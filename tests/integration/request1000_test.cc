@@ -20,6 +20,7 @@ std::string buildLoginResponseBody(const myrpc::RpcHeader&,
 }
 }
 
+// 多次同步请求复用连接，验证基本 request/response 循环不会积累错误状态。
 TEST(Request1000Test, SyncLoginRequestsShouldAllSucceed)
 {
     constexpr int kRequestCount = 1000;

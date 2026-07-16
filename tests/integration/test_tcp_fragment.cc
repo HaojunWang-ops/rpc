@@ -165,6 +165,7 @@ bool readLoginResponse(int fd, uint64_t* request_id, demo::LoginResponse* respon
 }
 }
 
+// 半包到达时服务端必须保留缓冲区，直到完整帧到齐。
 TEST(TcpFragmentTest, HalfPacketShouldBeAssembled)
 {
     ControlledTcpServer server(0, buildLoginResponseBody);
@@ -190,6 +191,7 @@ TEST(TcpFragmentTest, HalfPacketShouldBeAssembled)
     server.stop();
 }
 
+// 粘包输入包含两个完整帧时，服务端必须逐帧分发并返回两个响应。
 TEST(TcpFragmentTest, TwoFullPacketsInOneWriteShouldReturnTwoResponses)
 {
     ControlledTcpServer server(0, buildLoginResponseBody);
@@ -221,6 +223,7 @@ TEST(TcpFragmentTest, TwoFullPacketsInOneWriteShouldReturnTwoResponses)
     server.stop();
 }
 
+// 完整帧加半帧再补齐时，解析器不能丢失第二个请求的边界。
 TEST(TcpFragmentTest, OneAndHalfPacketsThenRemainderShouldReturnTwoResponses)
 {
     ControlledTcpServer server(0, buildLoginResponseBody);

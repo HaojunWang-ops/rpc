@@ -345,6 +345,7 @@ namespace
                 break;
             }
 
+            // 这是 repair 尝试数，不表示 replacement 一定已成功发布。
             pool.repairDeadChannels();
 
             std::lock_guard<std::mutex> lock(ctx.mutex);
@@ -651,6 +652,7 @@ int main(int argc, char *argv[])
         t.join();
     }
 
+    // 先停止故障注入，再检查已有请求能否自然 drain。
     disconnect_stop.store(true, std::memory_order_release);
     repair_stop.store(true, std::memory_order_release);
 

@@ -24,6 +24,7 @@ std::string buildLoginResponseBody(const myrpc::RpcHeader&,
 }
 }
 
+// 批量异步请求验证每个 callback 只完成一次，并且调用方状态覆盖到 done 执行。
 TEST(BatchAsyncTest, AllAsyncCallsShouldCompleteExactlyOnce)
 {
     constexpr int kRequestCount = 100;

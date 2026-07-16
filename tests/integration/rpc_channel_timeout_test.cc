@@ -86,6 +86,7 @@ bool startChannel(const std::shared_ptr<MyRpcChannel>& channel,
 }
 }
 
+// 服务端不返回响应时，同步调用必须在 RPC timeout 后返回失败。
 TEST(RpcChannelTimeoutTest, SyncCallShouldTimeoutAndReturnWithoutBlocking)
 {
     std::atomic<bool> release_response{false};
@@ -136,10 +137,12 @@ TEST(RpcChannelTimeoutTest, SyncCallShouldTimeoutAndReturnWithoutBlocking)
     server.stop();
 }
 
+// 多个异步请求同时超时时，每个 pending call 都应以失败结果完成一次。
 TEST(RpcChannelTimeoutTest, AsyncTimeoutsShouldCompleteEveryPendingCallExactlyOnce)
 {
     constexpr int kRequestCount = 32;
 
+    // 阻塞服务端响应，让所有请求只能通过 timeout 取得完成权。
     std::atomic<bool> release_response{false};
     ControlledTcpServer server(0, [&](const myrpc::RpcHeader& header,
                                       const std::string& body) {
@@ -194,6 +197,7 @@ TEST(RpcChannelTimeoutTest, AsyncTimeoutsShouldCompleteEveryPendingCallExactlyOn
     ASSERT_TRUE(server.waitForTotalRequests(kRequestCount,
                                             std::chrono::seconds(1)));
 
+    // 即使旧的 timeout heap 条目随后到期，也不能再次运行 done。
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     EXPECT_EQ(doneCountOf(*state), kRequestCount);
 
@@ -202,6 +206,7 @@ TEST(RpcChannelTimeoutTest, AsyncTimeoutsShouldCompleteEveryPendingCallExactlyOn
     server.stop();
 }
 
+// 正常 response 先取得完成权后，后续 lazy timeout 条目不能重复完成请求。
 TEST(RpcChannelTimeoutTest, SuccessfulCallsShouldNotRunDoneAgainWhenTimersExpire)
 {
     constexpr int kRequestCount = 8;
@@ -252,6 +257,7 @@ TEST(RpcChannelTimeoutTest, SuccessfulCallsShouldNotRunDoneAgainWhenTimersExpire
     server.stop();
 }
 
+// 并发提交与 channel stop 交错时，每次异步调用尝试都不能遗漏 done。
 TEST(RpcChannelTimeoutTest, ConcurrentAsyncSubmitAndStopShouldNotLoseDone)
 {
     constexpr int kThreadCount = 4;
@@ -305,6 +311,7 @@ TEST(RpcChannelTimeoutTest, ConcurrentAsyncSubmitAndStopShouldNotLoseDone)
         }));
     }
 
+    // 让部分提交进入 channel 后再 stop，覆盖提交和 pending 清理并发的窗口。
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     auto stop_future = std::async(std::launch::async, [&] {
         channel->stop();

@@ -28,6 +28,7 @@ bool waitUntil(std::chrono::milliseconds timeout, const std::function<bool()>& p
 }
 }
 
+// 未启动线程池不接受任务，调用方不能误以为任务已被执行。
 TEST(ThreadPoolTest, SubmitBeforeStartShouldThrow)
 {
     ThreadPool pool(2);
@@ -35,6 +36,7 @@ TEST(ThreadPoolTest, SubmitBeforeStartShouldThrow)
     EXPECT_THROW(pool.submit([] {}), std::runtime_error);
 }
 
+// 正常运行时每个已提交任务都应被 worker 执行。
 TEST(ThreadPoolTest, RunsAllSubmittedTasks)
 {
     ThreadPool pool(4);
@@ -58,6 +60,7 @@ TEST(ThreadPoolTest, RunsAllSubmittedTasks)
     EXPECT_EQ(completed.load(std::memory_order_relaxed), kTaskCount);
 }
 
+// stop 需要 drain 已入队任务，重复 stop 不改变已完成结果。
 TEST(ThreadPoolTest, StopShouldDrainQueuedTasksAndBeIdempotent)
 {
     ThreadPool pool(2);
@@ -80,6 +83,7 @@ TEST(ThreadPoolTest, StopShouldDrainQueuedTasksAndBeIdempotent)
     EXPECT_EQ(completed.load(std::memory_order_relaxed), kTaskCount);
 }
 
+// 多个生产者并发 submit 时，队列不能丢失任务。
 TEST(ThreadPoolTest, ConcurrentSubmitShouldRunAllTasks)
 {
     ThreadPool pool(4);

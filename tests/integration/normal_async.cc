@@ -20,6 +20,7 @@ std::string buildLoginResponseBody(const myrpc::RpcHeader&,
 }
 }
 
+// 最小端到端基线：生成的 stub、channel 编码、服务端分发和 response 解码都可用。
 TEST(NormalRpcTest, SyncLoginShouldReturnResponse)
 {
     ControlledTcpServer server(0, buildLoginResponseBody);

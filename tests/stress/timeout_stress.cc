@@ -309,6 +309,7 @@ bool waitForServerResponses(int64_t expected, std::chrono::milliseconds timeout)
 
 bool submitOne(demo::UserService_Stub &stub, StressContext &ctx, int64_t request_number)
 {
+    // request 序号决定服务端延迟类别：fast、near-timeout 或 late。
     auto state = std::make_shared<CallState>();
     state->request.set_name(std::to_string(request_number));
     state->request.set_password("timeout-stress");
@@ -495,6 +496,7 @@ int main(int argc, char *argv[])
         submitter.join();
     }
 
+    // 先等客户端完成，再等服务端写完所有响应，才能观察迟到 response 的处理。
     const bool drained = waitUntilDrained(
         ctx, std::chrono::milliseconds(std::max(10000, options.timeout_ms * 4)));
     const StressSnapshot result = snapshot(ctx);

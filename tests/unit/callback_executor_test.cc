@@ -26,6 +26,7 @@ bool waitUntil(std::chrono::milliseconds timeout, const std::function<bool()>& p
 }
 }
 
+// 防止 callback worker 调用 stop() 时 self-join，且 executor 仍可继续执行后续任务。
 TEST(CallbackExecutorTest, StopFromWorkerThreadShouldBeIgnoredAndKeepExecutorRunning)
 {
     CallbackExecutor executor;

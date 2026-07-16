@@ -151,6 +151,7 @@ private:
     int response_success_count_ = 0;
 };
 
+// 固定 pending 已接受与 stop 竞争的窗口，验证 timeout 注册失败路径不会重复完成。
 TEST(RpcChannelRaceTest, StopAfterPendingAcceptShouldCompleteCallExactlyOnce)
 {
     using namespace std::chrono_literals;
@@ -180,6 +181,7 @@ TEST(RpcChannelRaceTest, StopAfterPendingAcceptShouldCompleteCallExactlyOnce)
     auto hooks = std::make_shared<MyRpcChannel::RpcChannelTestHooks>();
 
     hooks->after_pending_added = [&](uint64_t){
+        // 固定在 pending 已接受、timeout 尚未注册的窗口，让 stop 先执行。
         reached_pending_promise.set_value();
 
         release_submit.wait();
@@ -233,6 +235,7 @@ TEST(RpcChannelRaceTest, StopAfterPendingAcceptShouldCompleteCallExactlyOnce)
     EXPECT_EQ(channel->pendingSizeForTest(), 0);
 }
 
+// 固定 response 和 timeout 同时争夺 take() 的交错，验证唯一完成权。
 TEST(RpcChannelRaceTest, TimeoutAndResponseRaceShouldCompleteExactlyOnce)
 {
     using namespace std::chrono_literals;
@@ -249,6 +252,7 @@ TEST(RpcChannelRaceTest, TimeoutAndResponseRaceShouldCompleteExactlyOnce)
     auto hooks = std::make_shared<MyRpcChannel::RpcChannelTestHooks>();
 
     hooks->before_pending_take = [race_state](MyRpcChannel::PendingTakePath path, uint64_t){
+        // reader 和 timeout 都在 take 前汇合，再同时竞争唯一完成权。
         race_state->beforeTake(path);
     };
     hooks->after_pending_take = [race_state](MyRpcChannel::PendingTakePath path, uint64_t ,bool taken){
@@ -284,6 +288,7 @@ TEST(RpcChannelRaceTest, TimeoutAndResponseRaceShouldCompleteExactlyOnce)
 
     ASSERT_TRUE(race_state->waitUtilBothArrived(2s));
     
+    // 两条路径都已到达同步点后才释放，避免测试依赖 sleep 猜测调度时序。
     race_state->release();
 
     ASSERT_TRUE(race_state->waitUtilBothAttempted(2s));

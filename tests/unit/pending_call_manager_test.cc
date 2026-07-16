@@ -16,6 +16,7 @@ std::shared_ptr<PendingCall> makeCall()
 }
 }
 
+// 未启动或停止接收时，不能把请求重新放入 pending 表。
 TEST(PendingCallManagerTest, RejectsAddBeforeAccepting)
 {
     PendingCallManager manager;
@@ -24,6 +25,7 @@ TEST(PendingCallManagerTest, RejectsAddBeforeAccepting)
               PendingCallManager::AddResult::kNotAccepting);
 }
 
+// add/take 定义单请求完成权，重复 id 和重复 take 都必须失败。
 TEST(PendingCallManagerTest, AddTakeAndDuplicateSemantics)
 {
     PendingCallManager manager;
@@ -39,6 +41,7 @@ TEST(PendingCallManagerTest, AddTakeAndDuplicateSemantics)
     EXPECT_EQ(manager.take(1), nullptr);
 }
 
+// fail-all 必须原子地取走已有请求，并阻止后续 add。
 TEST(PendingCallManagerTest, FailAllStopsAcceptingAndReturnsPendingCalls)
 {
     PendingCallManager manager;
@@ -60,6 +63,7 @@ TEST(PendingCallManagerTest, FailAllStopsAcceptingAndReturnsPendingCalls)
               PendingCallManager::AddResult::kNotAccepting);
 }
 
+// channel 重启前 reset 清理旧状态，并恢复接收新请求。
 TEST(PendingCallManagerTest, ResetForStartClearsOldPendingAndAcceptsAgain)
 {
     PendingCallManager manager;
@@ -73,6 +77,7 @@ TEST(PendingCallManagerTest, ResetForStartClearsOldPendingAndAcceptsAgain)
     EXPECT_EQ(manager.add(1, makeCall()), PendingCallManager::AddResult::kOk);
 }
 
+// 并发 add、take 和 fail-all 不应破坏 map 或让请求被重复取得。
 TEST(PendingCallManagerTest, ConcurrentAddTakeAndFailAllShouldBeSafe)
 {
     PendingCallManager manager;

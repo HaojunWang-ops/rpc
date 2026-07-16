@@ -25,6 +25,7 @@ demo::LoginRequest makeLoginRequest()
 }
 }
 
+// 编码后的长度前缀、header 和 body 必须符合线路协议布局。
 TEST(RpcCodecTest, EncodeRequestFrameShouldProduceExpectedWireFields)
 {
     auto request = makeLoginRequest();
@@ -56,6 +57,7 @@ TEST(RpcCodecTest, EncodeRequestFrameShouldProduceExpectedWireFields)
     EXPECT_EQ(header.args_size(), request.ByteSizeLong());
 }
 
+// 编码入口拒绝空 method/request/output，避免构造无效请求帧。
 TEST(RpcCodecTest, EncodeRequestFrameShouldRejectNullInputs)
 {
     auto request = makeLoginRequest();
@@ -75,6 +77,7 @@ TEST(RpcCodecTest, EncodeRequestFrameShouldRejectNullInputs)
     EXPECT_FALSE(error.empty());
 }
 
+// 先校验 frame 元信息，避免按不可信长度分配或读取。
 TEST(RpcCodecTest, DecodeFrameMetaShouldValidateSizes)
 {
     RpcCodec::FrameMeta meta;
@@ -92,6 +95,7 @@ TEST(RpcCodecTest, DecodeFrameMetaShouldValidateSizes)
     EXPECT_EQ(meta.body_size, 3u);
 }
 
+// 客户端必须拒绝超过协议上限的响应帧。
 TEST(RpcCodecTest, DecodeFrameMetaShouldRejectOversizedResponseFrames)
 {
     constexpr uint32_t kMaxResponseFrameSize = 64 * 1024 * 1024;
@@ -113,6 +117,7 @@ TEST(RpcCodecTest, DecodeFrameMetaShouldRejectOversizedResponseFrames)
     EXPECT_FALSE(error.empty());
 }
 
+// response header 中的长度声明必须与已验证的 frame 元信息一致。
 TEST(RpcCodecTest, DecodeResponseHeaderShouldValidateHeaderAndBodySize)
 {
     myrpc::RpcResponseHeader response_header;
@@ -147,6 +152,7 @@ TEST(RpcCodecTest, DecodeResponseHeaderShouldValidateHeaderAndBodySize)
     EXPECT_FALSE(error.empty());
 }
 
+// 只在 body 能解析为调用方提供的 protobuf message 时才视为成功。
 TEST(RpcCodecTest, DecodeResponseBodyShouldParseMessage)
 {
     demo::LoginResponse response;

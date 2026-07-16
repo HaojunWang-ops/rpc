@@ -190,6 +190,7 @@ bool readResponseHeader(int fd, myrpc::RpcResponseHeader* response_header)
 }
 }
 
+// 使用原始协议帧验证服务端错误 response 的线路字段，而非只验证 stub 表现。
 TEST(ServiceNotFoundRawProtocolTest, UnknownServiceShouldReceiveErrorFrame)
 {
     uint16_t port = 0;

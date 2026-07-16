@@ -26,6 +26,7 @@ std::string buildLoginResponseBody(const myrpc::RpcHeader&,
 }
 }
 
+// 在多个请求 pending 时断开连接，所有请求都必须以失败结果完成一次。
 TEST(ConnectionLostTest, AllPendingCallsShouldFailAndCallDoneOnce)
 {
     constexpr int kPoolSize = 4;

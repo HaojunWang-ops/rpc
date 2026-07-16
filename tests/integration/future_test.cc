@@ -65,6 +65,7 @@ static bool waitUntil(std::chrono::milliseconds timeout,
    return pred();     
 }
 
+// channel Future 在正常 response 后返回成功结果和已解析的 response。
 TEST(RpcFutureTest, ChannelFutureShouldResolveSuccessfulResponse)
 {
     ControlledTcpServer server(0, buildLoginResponseBody);
@@ -97,6 +98,7 @@ TEST(RpcFutureTest, ChannelFutureShouldResolveSuccessfulResponse)
     server.stop();
 }
 
+// timeout 不抛出调用线程异常，而是使 Future ready 并携带错误结果。
 TEST(RpcFutureTest, ChannelFutureTimeoutShouldResolveError)
 {
     std::atomic<bool> release_response{false};
@@ -144,6 +146,7 @@ TEST(RpcFutureTest, ChannelFutureTimeoutShouldResolveError)
     server.stop();
 }
 
+// FutureCallState 自持有请求状态，多线程提交不应丢失任何完成结果。
 TEST(RpcFutureTest, ChannelFutureConcurrentCallsShouldAllComplete)
 {
     ControlledTcpServer server(0, buildLoginResponseBody);
@@ -219,6 +222,7 @@ TEST(RpcFutureTest, ChannelFutureConcurrentCallsShouldAllComplete)
     server.stop();
 }
 
+// channel stop 必须让仍在飞行的 Future 变为失败 ready，而不是永久等待。
 TEST(RpcFutureTest, ChannelStopShouldResolveInFlightFutures)
 {
     constexpr int kRequestCount = 8;
@@ -283,6 +287,7 @@ TEST(RpcFutureTest, ChannelStopShouldResolveInFlightFutures)
     server.stop();
 }
 
+// pool 路径与直接 channel 一样，正常 response 应解析为成功 Future。
 TEST(RpcFutureTest, PoolFutureShouldResolveSuccessfulResponse)
 {
     ControlledTcpServer server(0, buildLoginResponseBody);
@@ -309,6 +314,7 @@ TEST(RpcFutureTest, PoolFutureShouldResolveSuccessfulResponse)
     server.stop();
 }
 
+// pool 已停止时提交 Future 仍必须立即提供可读取的失败结果。
 TEST(RpcFutureTest, PoolFutureAfterStopShouldReturnReadyError)
 {
     ControlledTcpServer server(0, buildLoginResponseBody);
