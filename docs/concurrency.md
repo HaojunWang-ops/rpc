@@ -1,599 +1,1239 @@
-# my_rpc 并发设计
+# my_rpc 客户端并发模型与生命周期设计
 
-本文档描述当前 `my_rpc` 客户端侧并发实现的实际行为，主要覆盖 `RpcChannelPool`、`MyRpcChannel`、`PendingCallManager`、`RpcTimeoutManager` 和 `CallbackExecutor`。
+> 本文档描述当前 `my_rpc` 客户端实现的并发模型、生命周期边界和可验证行为。  
+> 覆盖组件包括 `RpcChannelPool`、`MyRpcChannel`、`PendingCallManager`、`RpcTimeoutManager` 与 `CallbackExecutor`。
+>
+> 文中的“保证”仅表示能够由当前实现及测试证据推导出的行为；“限制”表示当前实现未提供更强契约，或仍需要确定性并发测试进一步验证的部分。
 
-本文档中的“保证”仅指当前代码可推导出的行为；“限制”表示当前实现尚未形成更强契约或仍需补充确定性测试的部分。
+---
 
-## 1. 总体模型
+## 1. 设计目标与核心结论
 
-`RpcChannelPool` 是 channel 和 callback executor 的生命周期 owner。一个 pool 持有固定大小的不可变 channel snapshot；调用线程从 snapshot 中选择 channel 并提交 RPC。每个 channel 有自己的 reader 线程、pending-call 表和 timeout manager。
+客户端并发设计主要解决以下问题：
+
+1. 多线程调用方能够安全地共享连接池并提交 RPC。
+2. response、timeout、断连和 stop 等终止路径竞争时，一个请求只完成一次。
+3. pool、channel、reader、timeout worker 和 callback executor 之间具有明确的所有权与停止顺序。
+4. repair 与 stop 并发时，不允许在 pool 停止后重新发布 replacement channel。
+5. 用户回调不得在持有框架内部互斥锁时执行。
+
+当前实现提供以下核心保证：
+
+- `PendingCallManager::take(request_id)` 是单请求终止路径的主要线性化点。
+- response、timeout、断连和 stop 不能同时取得同一个 `PendingCall`。
+- 不可变 channel snapshot 通过 `shared_ptr` 原子发布，读取方持有局部快照后不受后续替换影响。
+- pool 停止时先停止 channel，再停止 callback executor，避免 channel 使用已经销毁的 executor。
+- 用户 `done` 在内部锁释放后执行。
+- callback executor 会 drain 已成功入队的回调后再退出。
+
+当前实现不提供以下保证：
+
+- 普通异步 callback API 不自动拥有调用方传入的 request、response 和 controller；三者的生命周期要求并不相同。
+- `done` 没有固定线程亲和性，不能假定总在 callback worker 上执行。
+- 销毁 pool 时，不支持外部线程继续并发调用其成员函数。
+- 销毁 `future` 不会取消已经提交的 RPC。
+- `repairDeadChannels()` 不提供独立的“repair 已完全退出”屏障。
+
+---
+
+## 2. 总体架构
+
+`RpcChannelPool` 是 channel 集合和 callback executor 的生命周期所有者。pool 持有一个固定大小、发布后不再原地修改的 channel snapshot；调用线程从 snapshot 中选择可用 channel 并提交请求。
+
+每个 `MyRpcChannel` 独立维护：
+
+- 一个 reader 线程；
+- 一个 pending-call 表；
+- 一个 timeout manager；
+- 一个 TCP 连接及其发送互斥；
+- channel 生命周期状态。
 
 ```text
 RpcChannelPool
   ├── unique_ptr<CallbackExecutor>
-  └── shared_ptr<ChannelList> channels_snapshot_
+  └── shared_ptr<const ChannelList> channels_snapshot_
         ├── shared_ptr<MyRpcChannel>
         │     ├── reader thread
         │     ├── PendingCallManager
-        │     └── RpcTimeoutManager
+        │     ├── RpcTimeoutManager
+        │     └── socket
         └── ...
 ```
 
-`MyRpcChannel` 不拥有 `CallbackExecutor`，只保存一个非拥有的 `CallbackExecutor*`。因此 pool 必须先停止所有 channel，再停止 executor；否则 channel 在完成请求时可能访问已经销毁的 executor。
-
-## 2. 线程与职责
-
-| 线程角色 | 创建者 | 主要工作 | 是否执行用户 `done` |
-|---|---|---|---|
-| 调用方线程 | 用户代码 | 调用 `RpcChannelPool::CallMethod()` 或 future API | pool 拒绝调用、early error、executor 已停止时可能 inline 执行 |
-| channel reader 线程 | `MyRpcChannel::start()` | 读取 response frame、匹配 pending call、处理连接失败 | 正常情况下投递 executor；executor 不可用时 inline |
-| timeout worker | `RpcTimeoutManager::start()` | 等待 deadline，通知 channel 某个 request id 超时 | 经 `onRpcTimeout()` 投递 executor；executor 不可用时 inline |
-| callback executor worker | `CallbackExecutor::start()` | 顺序执行已投递的用户 closure | 是，通常在此执行 |
-| pool owner / stop 线程 | 用户代码 | start、stop、等待短生命周期的 `active_calls_` | channel stop 产生的 callback 通常投递 executor |
-| repair 线程 | 用户代码或 stress 测试 | 调用 `repairDeadChannels()` 重建不可用 channel | 可能因 stop 新建或停止 channel，间接触发回调 |
-
-重要结论：`done` 没有单一固定线程亲和性。正常异步完成通常经 `CallbackExecutor` 执行，但 early error 和 executor 已停止时会在当前线程 inline 执行。用户回调不能假定始终运行在同一线程。
-
-## 3. 所有权与生命周期
-
-### 3.1 `RpcChannelPool`
-
-- pool 通过 `channels_snapshot_` 间接持有所有 channel。
-- snapshot 以 `shared_ptr<ChannelList>` 原子发布；发布后 vector 不再原地修改。
-- `pickChannel()` 先取得 snapshot 的 `shared_ptr`，再复制其中的 `shared_ptr<MyRpcChannel>`。因此即使同时发生 repair 或 stop，当前调用线程拿到的 channel 在 `CallMethod()` 返回前仍然存活。
-- `RpcChannelPool::~RpcChannelPool()` 调用 `stop()`。析构前调用者必须停止外部提交线程，避免析构与新的外部 API 调用并发。
-
-### 3.2 `MyRpcChannel`
-
-- channel 由 `MyRpcChannel::create()` 以 `shared_ptr` 创建。
-- `MyRpcChannel::start()` 创建 reader 线程时，lambda 捕获 `shared_ptr<MyRpcChannel>`；这保证 reader 运行期间对象不会析构。
-- `MyRpcChannel::CallMethod()` 和 `MyRpcChannel::stop()` 也用 `shared_from_this()` 在函数作用域内固定对象生命周期。
-- `MyRpcChannel` 不允许在 reader 线程析构；析构时检测到这种情况会 `std::terminate()`。
-
-因此，断连不会立即析构 channel：
+`MyRpcChannel` 不拥有 `CallbackExecutor`，只保存一个非拥有的 `CallbackExecutor*`。因此生命周期顺序必须满足：
 
 ```text
-reader 发现错误
-  -> failFromReaderThread()
-  -> markPendingFailed() 使 channel 不可用
-  -> pool snapshot 仍持有旧 channel
-  -> repair 替换旧 channel，或 pool.stop() 清空 snapshot
-  -> 所有临时 shared_ptr 和 reader 自引用释放后
-  -> MyRpcChannel 才析构
+stop all channels
+  -> drain and stop CallbackExecutor
+  -> destroy pool-owned objects
 ```
 
-### 3.3 `PendingCall`
+如果先销毁 executor，channel 的 response、timeout 或 stop 完成路径可能访问悬空指针。
 
-`PendingCallManager::pending_` 保存所有“已接受但尚未终止”的请求。一个 `PendingCall` 通过 `shared_ptr` 保存 controller、response 和 done closure 的裸指针；这些外部对象的实际生命周期由调用方式决定：
+---
 
-- 同步调用在 `CallMethod()` 内等待 `call->finished`，调用栈中的 request、response、controller 仍然有效。
-- 异步调用要求调用者保证 request、response、controller 在 done 前有效；stress 测试通过 `shared_ptr<CallState>` 捕获它们。
-- future API 使用 `FutureCallState` 持有 request、response、controller 和 promise，因此外部 request 不需要继续存活。
+## 3. 线程模型
 
-这是当前异步 API 的重要边界：普通 callback 风格不会自动拥有调用者传入的 request / response / controller。
+| 线程角色 | 创建者 | 主要职责 | 是否可能执行用户 `done` |
+|---|---|---|---|
+| 调用方线程 | 用户代码 | 调用同步、异步或 Future API | pool 拒绝、early error、executor 不可用时可能 inline 执行 |
+| channel reader 线程 | `MyRpcChannel::start()` | 读取 response、解析帧、匹配 pending、处理连接失败 | 通常投递 executor；投递失败时 inline 执行 |
+| timeout worker | `RpcTimeoutManager::start()` | 等待 deadline，并通知 channel 处理超时 | 经 `onRpcTimeout()` 完成请求；executor 不可用时可能 inline |
+| callback executor worker | `CallbackExecutor::start()` | 顺序执行已入队 closure | 正常异步完成通常在此执行 |
+| pool owner / stop 线程 | 用户代码 | `start()`、`stop()`、析构与资源收束 | channel stop 产生的回调通常被投递到 executor |
+| repair 调用线程 | 用户代码或测试 | 检测不可用 channel、创建 replacement、发布 snapshot | 停止旧 channel 或未发布 replacement 时可能间接触发回调 |
 
-## 4. 状态机
+### 3.1 回调线程亲和性
+
+`done` 没有固定线程亲和性。
+
+正常异步完成路径通常为：
+
+```text
+reader / timeout / stop path
+  -> CallbackExecutor::post(done)
+  -> callback worker 执行 done
+```
+
+但以下情况会在当前线程 inline 执行：
+
+- pool 在提交入口拒绝调用；
+- 编码或其他 early error；
+- callback executor 为空；
+- `CallbackExecutor::post()` 失败；
+- executor 已进入停止状态，不再接受新任务。
+
+因此用户回调必须满足：
+
+- 不依赖固定线程 ID；
+- 不假定串行执行，除非明确知道所有回调均已成功投递到单 worker executor；
+- 不在 callback worker 内直接调用 `RpcChannelPool::stop()`。
+
+---
+
+## 4. 所有权与生命周期
 
 ### 4.1 `RpcChannelPool`
 
-```text
-kStopped --start()--> kRunning --stop()--> kStopping --清理完成--> kStopped
-```
+pool 通过原子发布的 `channels_snapshot_` 间接持有 channel：
 
-| 状态 | 新 `CallMethod()` | `start()` | `stop()` | snapshot | callback executor |
-|---|---|---|---|---|---|
-| `kStopped` | 直接失败，inline 执行 done | 创建 channel 并发布 snapshot | 直接返回 | 空 | 已停止 |
-| `kRunning` | 允许进入 `active_calls_` | 返回 false | 进入 `kStopping` | 非空 | 运行中 |
-| `kStopping` | `enterCall()` 拒绝 | 返回 false | 直接返回 | 已摘除 | 仍运行，用于 drain callback |
+- snapshot 类型为 `shared_ptr<ChannelList>` 或等价不可变视图；
+- snapshot 发布后，不再原地修改 vector；
+- repair 通过构造新 snapshot 并整体替换完成更新；
+- stop 通过将当前 snapshot 摘除，使后续提交无法获取旧 channel。
 
-`start()` 先启动 executor，再逐个连接并启动 channel，最后在 `repair_mutex_` 下发布新 snapshot，并把状态设为 `kRunning`。
-
-`stop()` 的顺序是：
+`pickChannel()` 的生命周期行为为：
 
 ```text
-1. 拒绝从 callback executor worker 调用 stop，避免 worker 自己 join 自己。
-2. 在 lifecycle mutex 下将 pool 置为 kStopping。
-3. 在 repair mutex 下摘除 channels_snapshot_。
-4. 在锁外逐个 stop 旧 channel。
-5. 等待 active_calls_ == 0。
-6. stop callback executor；executor 会 drain 已入队的任务。
-7. 将 pool 置为 kStopped。
+acquire load snapshot shared_ptr
+  -> 从 vector 复制 shared_ptr<MyRpcChannel>
+  -> 使用局部 channel shared_ptr 提交请求
 ```
 
-`active_calls_` 只覆盖 `RpcChannelPool::CallMethod()` 从 `enterCall()` 到 `leaveCall()` 的提交过程，不覆盖异步 RPC 从提交到 callback 的完整生命周期。异步请求的收束由随后每个 channel 的 `stop()` 负责。
+即使 repair 或 stop 同时替换、清空全局 snapshot，调用线程持有的局部 `shared_ptr` 仍保证 channel 对象存活。
+
+`RpcChannelPool::~RpcChannelPool()` 调用 `stop()`。调用者必须在析构前停止外部提交线程；不支持析构与新的外部 API 调用并发。
 
 ### 4.2 `MyRpcChannel`
 
-```text
-kStopped --start/connect--> kRunning --stop 或 reader failure--> kStopping --清理--> kStopped
-```
+channel 由 `MyRpcChannel::create()` 以 `shared_ptr` 创建。
 
-| 状态 | `isAvailable()` | `pending_` 是否接受新请求 | reader | timeout manager |
-|---|---|---|---|---|
-| `kStopped` | false | 通常不接受 | 未运行 | 已停止 |
-| `kRunning` | true | 接受 | 运行 | 运行 |
-| `kStopping` | false | 不接受 | 正在退出或已退出 | 等待 `stop()` 停止 |
+以下位置会显式固定对象生命周期：
 
-`markPendingFailed()` 是连接失败到 repair 的关键桥梁：它先在 `lifecycle_mutex_` 下把 `state_` 从 `kRunning` 改成 `kStopping`，随后将 `running_` 设为 false、`shutdown()` socket、并通过 `pending_.failAllAndStopAccepting()` 取走所有 pending call。
+- `start()` 创建 reader 线程时，线程入口 lambda 捕获 `shared_ptr<MyRpcChannel>`；
+- `CallMethod()` 在函数作用域内保存 `shared_from_this()`；
+- `stop()` 在函数作用域内保存 `shared_from_this()`。
 
-因此 repair 判断的不是 `running_`，而是：
+因此，连接断开不会立即析构 channel：
 
 ```text
-failFromReaderThread()
+reader 检测错误
+  -> failFromReaderThread()
   -> markPendingFailed()
   -> state_ = kStopping
-  -> isAvailable() 返回 state_ == kRunning
-  -> repair 识别该 channel 不可用
+  -> pool snapshot 仍可能持有旧 channel
+  -> repair 替换旧 channel，或 pool.stop() 摘除 snapshot
+  -> reader 自引用与所有临时 shared_ptr 释放
+  -> MyRpcChannel 析构
 ```
 
-`failFromReaderThread()` 不直接调用完整 `stop()`，因为它本身运行在 reader 线程，不能 join 自己。它会 detach 当前 thread handle、完成 pending call；后续 repair 或 pool stop 从非 reader 线程调用 `stop()`，完成 reader 句柄、socket 和 timeout manager 的最终清理。
+`MyRpcChannel` 不允许在 reader 线程中析构。若析构时检测到当前线程为 reader 线程，实现会调用 `std::terminate()`，以避免 thread handle、socket 和内部资源在错误线程中被清理。
 
-## 5. 请求完成模型
+### 4.3 `PendingCall`
 
-### 5.1 唯一完成权
+`PendingCallManager::pending_` 保存所有“已接受但尚未终止”的请求。
 
-一次 RPC 的完成权由 `PendingCallManager::take(request_id)` 决定：谁先成功从 pending 表中取走 call，谁负责设置结果并运行 done。其他路径取到 `nullptr` 时必须退出，不能再次完成同一 call。
+`PendingCall` 自身由 `shared_ptr` 管理，但其中保存的 controller、response 和 done closure 仍可能是外部裸指针。它们的生命周期取决于调用方式：
+
+| 调用方式          | request 生命周期 | response / controller 生命周期 |
+| ------------- | ------------ | ------------------------------ |
+| 同步调用          | 至少到 `CallMethod()` 返回 | `CallMethod()` 阻塞至 `call->finished`，调用栈对象在返回前有效 |
+| 普通异步 callback | 至少到 `CallMethod()` 返回 | 调用者必须保证存活到 `done` 返回 |
+| Future API    | `FutureCallState` 内部持有 | `FutureCallState` 内部持有 |
+
+普通异步 API 的边界必须明确：
+
+> channel 在 `CallMethod()` 内同步序列化 request，但不会保存它；request 至少必须存活到 `CallMethod()` 返回。channel 也不会自动接管 response 和 controller，它们在普通异步调用中必须存活到 `done` 返回。`done` closure 本身也必须在 `Run()` 前保持有效，除非其具体实现自行管理生命周期。
+
+---
+
+## 5. 生命周期状态机
+
+### 5.1 `RpcChannelPool`
+
+```text
+kStopped --start()--> kRunning --stop()--> kStopping --cleanup--> kStopped
+```
+
+| 状态          | 新 `CallMethod()`                    | `start()`  | `stop()`          | snapshot | callback executor    |
+| ----------- | ----------------------------------- | ---------- | ----------------- | -------- | -------------------- |
+| `kStopped`  | 拒绝，设置 controller 失败并 inline 执行 done | 尝试创建完整运行环境 | 直接返回              | 空        | 已停止                  |
+| `kRunning`  | 允许进入提交过程                            | 返回失败       | 转入 `kStopping`    | 非空       | 运行中                  |
+| `kStopping` | `enterCall()` 拒绝                    | 返回失败       | 重复调用直接返回 | 已摘除      | 继续运行以 drain callback |
+
+#### `start()` 顺序
+
+```text
+1. 在lifecycle_mutex_下
+2. 检查当前状态允许启动。
+3. 启动 CallbackExecutor。
+4. 逐个创建、连接并启动 channel。
+5. 在 repair 同步边界内发布完整 snapshot。
+6. 将 pool 状态置为 `kRunning`。
+```
+
+启动失败时应回滚已经启动的 channel 和 executor，不发布不完整 snapshot。
+
+#### `stop()` 顺序
+
+当前文档按以下实际语义描述：
+
+```text
+1. 拒绝从 callback executor worker 调用 stop，避免 self-join。
+2. 在 lifecycle_mutex_ 下将 pool_state_ 置为 kStopping。
+3. 在 repair_mutex_ 下摘除 channels_snapshot_，保留 old_snapshot。
+4. 在锁外逐个 stop old_snapshot 中的 channel。
+5. 等待 active_calls_ == 0。
+6. stop CallbackExecutor；executor drain 已成功入队的 done 回调任务。
+7. 在lifecycle_mutex_下，将 pool_state_ 置为 kStopped。
+```
+
+`active_calls_` 只覆盖：
+
+```text
+RpcChannelPool::CallMethod()
+  enterCall()
+  ...
+  leaveCall()
+```
+
+它表示“仍有线程停留在 pool 的提交函数中”，不表示“仍有异步 RPC 未完成”。
+
+channel 的 `stop()` 负责终止已经提交的 pending 请求；`active_calls_` 主要保证 callback executor 不会在提交函数仍可能产生完成回调时被停止。
+
+### 5.2 `MyRpcChannel`
+
+```text
+kStopped --start/connect--> kRunning
+kRunning --stop/reader failure/write failure--> kStopping
+kStopping --final cleanup--> kStopped
+```
+
+| 状态 | `isAvailable()` | pending 是否接受新请求 | reader | timeout manager |
+|---|---|---|---|---|
+| `kStopped` | false | 不接受 | 未运行 | 已停止 |
+| `kRunning` | true | 接受 | 运行 | 运行 |
+| `kStopping` | false | 不接受 | 正在退出或已退出 | 等待完整 `stop()` 收束 |
+
+`markPendingFailed()` 是传输失败与 repair 之间的关键桥梁：
+
+```text
+lifecycle_mutex_:
+  state_ kRunning -> kStopping
+
+setLastError(reason);
+running_ = false
+shutdown(socket)
+pending_.failAllAndStopAccepting()
+```
+
+repair 通过 `isAvailable()` 检查 `state_ == kRunning`，而不是只读取 `running_`。因此 reader failure 将 channel 状态置为 `kStopping` 后，repair 能够识别该 channel 不可用。
+
+`failFromReaderThread()` 不执行完整 `stop()`，因为 reader 线程不能 join 自己。它负责：
+
+- 将 channel 标记为不可用；
+- 停止继续接受 pending；
+- 终止并完成当前 pending 请求；
+- 处理当前 reader thread handle。
+
+最终 socket、reader handle 和 timeout manager 的完整清理依赖后续 repair 或 pool stop 从非 reader 线程调用 `stop()`。
+
+---
+
+## 6. 请求生命周期与唯一完成权
+
+### 6.1 请求提交顺序
+
+当前 `MyRpcChannel::CallMethod()` 的主要顺序为：
+
+```text
+1. 固定 channel 生命周期。
+2. 生成 request_id 并编码请求帧。
+3. pending_.add(request_id, call)。
+4. timeout_manager_.add(request_id, timeout)。
+5. 获取 send_mutex_。
+6. WriteN(request frame)。
+7. 同步调用等待 call->finished；异步调用返回。
+```
+
+完成路径包括：
+
+- 正常 response；
+- 服务端返回 RPC 错误；
+- response body 解码失败；
+- timeout；
+- socket 写失败；
+- reader 检测连接失败；
+- channel stop；
+- timeout manager 无法接受新条目；
+- pool 在提交入口拒绝调用。
+
+### 6.2 唯一完成权
+
+一次 RPC 的完成权由 `PendingCallManager` 中的移除操作决定：
 
 ```text
 正常 response  -> pending_.take(request_id)
 timeout         -> pending_.take(request_id)
+单请求提交失败  -> pending_.take(request_id)
 断连 / stop    -> pending_.failAllAndStopAccepting()
-
-先取得 call 的路径获胜；其他路径不再执行 done。
 ```
 
-### 5.2 终止路径
+规则是：
 
-| 路径 | 触发线程 | 如何取得完成权 | controller 结果 | 后续迟到事件 |
+> 只有成功从 pending 表取得 `PendingCall` 的路径，才允许写入 response/controller 并执行最终完成逻辑。
+
+其他路径得到 `nullptr` 后必须退出，不得修改用户状态，也不得再次执行 `done`。
+
+这一规则尤其要求 response 路径遵守：
+
+```text
+错误顺序：
+  ParseFromString(response_body)
+  pending_.take(request_id)
+
+正确顺序：
+  call = pending_.take(request_id)
+  if (!call) return
+  ParseFromString(response_body)
+```
+
+否则 timeout 已经取得完成权后，reader 仍可能修改 response，形成“回调只执行一次，但用户状态被两个路径同时写入”的竞态。
+
+### 6.3 终止路径
+
+| 终止路径 | 触发线程 | 取得完成权 | controller 结果 | 迟到事件 |
 |---|---|---|---|---|
-| 正常响应 | reader | `pending_.take(id)` | 保持成功状态 | timeout 条目到期后 `take` 失败并忽略 |
-| 服务端 RPC 错误 | reader | `pending_.take(id)` | `header.error_text()` | 同上 |
-| response body 解码失败 | reader | `pending_.take(id)` | 解码错误 | 同上 |
-| timeout | timeout worker | `onRpcTimeout()` 中 `pending_.take(id)` | `rpc call timeout` | 后来的 response 记录 DEBUG 并忽略 |
-| 写失败 | 调用方线程 | `markPendingFailed()` 批量取走 | `send rpc error` | reader / timeout 后续发现无 pending 并退出 |
-| reader 检测断连 | reader | `markPendingFailed()` 批量取走 | reader 错误原因 | timeout 后续 `take` 失败并忽略 |
-| `channel.stop()` | pool owner / repair | `markPendingFailed()` 批量取走 | `stop() is called` | timeout 后续 `take` 失败并忽略 |
-| timeout manager 不可用 | 调用方线程 | `pending_.take(id)` | `add timeout manager error` | 无 timeout 条目 |
+| 正常响应 | reader | `pending_.take(id)` | 保持成功 | timeout 到期后 `take` 失败 |
+| 服务端 RPC 错误 | reader | `pending_.take(id)` | 服务端错误文本 | timeout 到期后忽略 |
+| response 解码失败 | reader | `pending_.take(id)` | response decode error | timeout 到期后忽略 |
+| timeout | timeout worker | `pending_.take(id)` | `rpc call timeout` | 迟到 response 被忽略 |
+| timeout 注册失败 | 调用方线程 | `pending_.take(id)` | timeout manager error | 不存在有效 timeout 条目 |
+| 写失败 | 调用方线程 | `failAllAndStopAccepting()` | `send rpc error` | reader/timeout 后续无法取得 call |
+| reader 断连 | reader | `failAllAndStopAccepting()` | reader error | timeout 后续忽略 |
+| `channel.stop()` | pool owner / repair | `failAllAndStopAccepting()` | `stop() is called` | timeout 后续忽略 |
+| pool 拒绝提交 | 调用方线程 | 请求未进入 pending | `RpcChannel is stopped` 等 | 无后续传输事件 |
 
-`RpcTimeoutManager` 不持有 `PendingCall`。它只保存 `request_id + deadline`，到期后回调 `MyRpcChannel::onRpcTimeout(request_id)`；真正取走 call 的仍是 `PendingCallManager`。
-
-### 5.3 done 的执行
-
-`finishCall()` 先把 `call->done` 置空、设置 `call->finished = true` 并通知同步等待者，之后调用 `runDone()`。这样同步等待和异步 callback 都在 pending 所有权已经确定后发生。
-
-`runDone()` 的规则：
+`RpcTimeoutManager` 不持有 `PendingCall`。它只持有：
 
 ```text
-CallbackExecutor::post() 成功
-  -> 在 callback worker 执行 done。
-
-post() 失败，或 executor 为空
-  -> 当前线程 inline 执行 done。
+request_id + deadline
 ```
 
-因此不得在持有 `PendingCallManager` mutex、channel lifecycle mutex 或 send mutex 时执行用户 done；当前实现中 `take()` / `failAllAndStopAccepting()` 在内部锁中完成后才返回 call，callback 在锁外执行。
+deadline 到期后调用 `MyRpcChannel::onRpcTimeout(request_id)`，由 channel 再次进入 `PendingCallManager::take()` 竞争完成权。
 
-## 6. Timeout 语义
+### 6.4 `finishCall()` 与 `done`
 
-当前代码的实际顺序是：
+`finishCall()` 的逻辑顺序为：
 
 ```text
-1. pending_.add(request_id, call)
-2. timeout_manager_.add(request_id, timeout)
-3. 获取 send_mutex_
-4. WriteN(request frame)
+1. 取出并清空 call->done。
+2. 在 call->mutex 下设置 call->finished = true。
+3. 通知同步等待者。
+4. 调用 runDone(done)。
 ```
 
-因此 timeout 从成功登记到 `RpcTimeoutManager` 时开始，覆盖等待 `send_mutex_`、socket 写入和服务端处理时间。`include/myrpc/rpc_timeout_manager.h` 中“timeout 不覆盖 blocking write”的旧注释与当前调用顺序不一致，应以代码行为为准，并在后续修改时统一文档和注释。
+同步等待者和异步回调都只会在请求已从 pending 表移除后观察终态。
 
-timeout manager 采用 lazy cleanup：正常完成时不会立即从 timeout heap 删除对应条目；该条目到期后，`onRpcTimeout()` 再次 `pending_.take(id)` 会得到空指针，于是安全忽略。
+`runDone()` 的执行规则：
 
-迟到 response 的处理类似：reader 收到 response 后 `pending_.take(id)` 返回空，记录 DEBUG：该请求已被 timeout、断连或 stop 路径完成。
+```text
+CallbackExecutor::post(done) 成功
+  -> callback worker 执行 done
 
-## 7. 共享状态与同步
+executor 为空或 post 失败
+  -> 当前线程 inline 执行 done
+```
 
-### 7.1 Pool
+框架不得在持有以下锁时执行用户回调：
 
-| 同步原语 | 保护内容 | 主要使用位置 |
+- `PendingCallManager::mutex_`；
+- channel `lifecycle_mutex_`；
+- `send_mutex_`；
+- `reader_mutex_`；
+- pool `lifecycle_mutex_`；
+- `repair_mutex_`。
+
+用户 callback 可能重入 RPC、获取用户锁或触发其他阻塞操作，因此必须始终在框架内部临界区之外执行。
+
+---
+
+## 7. Timeout 语义
+
+当前 timeout 注册顺序为：
+
+```text
+pending_.add()
+  -> timeout_manager_.add()
+  -> 等待 send_mutex_
+  -> WriteN()
+  -> 等待服务端处理与 response
+```
+
+因此 timeout 从成功加入 `RpcTimeoutManager` 时开始，覆盖：
+
+- 等待 `send_mutex_`；
+- socket 写入；
+- 服务端排队与处理；
+- response 返回。
+
+### 7.1 Lazy cleanup
+
+timeout manager 使用 lazy cleanup：
+
+- 正常 response 完成后，不立即从 timeout heap 删除对应条目；
+- timeout 条目到期后仍会调用 `onRpcTimeout(id)`；
+- 此时 `pending_.take(id)` 返回 `nullptr`，路径安全退出。
+
+迟到 response 采用相同原则：
+
+```text
+timeout / stop / disconnect 已完成 call
+  -> reader 收到迟到 response
+  -> pending_.take(id) == nullptr
+  -> 记录 DEBUG 并忽略
+```
+
+lazy cleanup 简化了 timeout heap 删除逻辑，但会保留过期前的 stale timeout item；相关内存占用取决于 timeout 数量和 deadline 分布。
+
+---
+
+## 8. 共享状态与同步原语
+
+### 8.1 Pool 级同步
+
+| 同步原语 | 保护或发布的状态 | 主要使用位置 |
 |---|---|---|
 | `lifecycle_mutex_` | `pool_state_`、`active_calls_`、stop 等待条件 | `start()`、`stop()`、`enterCall()`、`leaveCall()` |
-| `repair_mutex_` | snapshot 读取、替换和发布过程 | `start()` 发布、`stop()` 摘除、repair |
-| 原子 `channels_snapshot_` 操作 | 无锁读取 snapshot 的可见性 | `pickChannel()`、`unavailableCount()` |
-| 原子 `next_` | round-robin 选取索引 | `pickChannel()`，`memory_order_relaxed` |
+| `repair_mutex_` | snapshot 的比较、替换与发布过程 | start 发布、stop 摘除、repair |
+| 原子 snapshot load/store | 不可变 snapshot 的跨线程可见性 | `pickChannel()`、`unavailableCount()` |
+| 原子 `next_` | round-robin 索引分配 | `pickChannel()` |
 
-pool 的锁顺序是 `lifecycle_mutex_ -> repair_mutex_`，见 `start()` 和 `stop()`。repair 过程避免在 `repair_mutex_` 内执行网络 connect、channel start 或 channel stop；它先复制 snapshot，在锁外做慢操作，再重新取得 repair mutex 比较并尝试发布。
+`next_` 不发布其他共享数据，只用于分配索引，因此使用 `memory_order_relaxed` 足够。
 
-### 7.2 Channel
+snapshot 使用 release store / acquire load，使构造完成的不可变 channel 列表安全发布给读取线程。
 
-| 同步原语 | 保护内容 | 主要使用位置 |
-|---|---|---|
-| `lifecycle_mutex_` | `state_` 状态转换 | `start()`、`markPendingFailed()`、`stop()`、`isAvailable()` |
-| 原子 `running_` | reader / transport I/O 是否继续 | reader 循环、`ReadN()`、`WriteN()`、失败路径 |
-| `send_mutex_` | 写 socket 与最终 close 的互斥 | `CallMethod()`、`cleanupStoppedConnection()` |
-| `reader_mutex_` | `reader_thread_` 的 move、join、detach、thread id | start、join、reader failure |
-| `error_mutex_` | `last_error_` | `setLastError()`、`LastError()` |
-| `PendingCallManager::mutex_` | `accepting_` 和 pending map | add、take、failAll |
-| `RpcTimeoutManager::mutex_` | timeout heap 和 worker wait | add、loop、stop |
+### 8.2 Channel 级同步
 
-fd 关闭顺序由 `cleanupStoppedConnection()` 约束：先让 `running_ = false` 并 `shutdown()` 唤醒阻塞 I/O，再 join reader，之后取得 `send_mutex_` 并 close socket。因此 close 不应与正在进行的 `ReadN()` 或 `WriteN()` 并发。
+| 同步原语                  | 保护或发布的状态                                        | 主要使用位置                                                   |
+| --------------------- | ----------------------------------------------- | -------------------------------------------------------- |
+| `lifecycle_mutex_`    | `state_` 转换                                     | `start()`、`markPendingFailed()`、`stop()`、`isAvailable()` |
+| 原子 `running_`         | reader 与传输 I/O 是否继续                             | reader loop、`ReadN()`、`WriteN()`、失败路径                    |
+| `send_mutex_`         | socket 写入与最终 close 的互斥                          | `CallMethod()`、`cleanupStoppedConnection()`              |
+| `reader_mutex_`       | reader thread handle、thread id、move/join/detach | start、join、reader failure                                |
+| `error_mutex_`        | `last_error_`                                   | `setLastError()`、`LastError()`                           |
+| pending manager mutex | `accepting_` 与 pending map                      | add、take、failAll                                         |
+| timeout manager mutex | timeout heap 与 worker wait                      | add、loop、stop                                            |
 
-### 7.3 内存序
+### 8.3 Socket 关闭顺序
 
-- `running_` 使用 release store / acquire load，发布“reader 和 transport 应退出”的事实。
-- timeout manager 的 `running_` 同样使用 release store / acquire load；heap 仍由 mutex 保护。
-- `channels_snapshot_` 用 release store / acquire load 发布不可变 snapshot。
-- `next_` 只用于索引分配，没有发布其他数据，使用 relaxed 合理。
-
-## 8. 关键竞态
-
-### 8.1 Submit vs Stop
+`cleanupStoppedConnection()` 应满足：
 
 ```text
-提交线程                                stop 线程
-----------                              ----------
-enterCall(): active_calls_++
-                                      pool_state_ = kStopping
-                                      摘除 snapshot
-pickChannel() 持有 local shared_ptr
-channel.CallMethod()
-leaveCall(): active_calls_--
-                                      等待 active_calls_ == 0
-                                      stop channels，再 stop executor
+running_ = false
+  -> shutdown(socket)，唤醒阻塞 I/O
+  -> join reader
+  -> 获取 send_mutex_
+  -> close(socket)
 ```
 
-`active_calls_` 确保 stop 不会在 pool 的提交函数仍在执行时停止 executor。channel 的局部 `shared_ptr` 和 `CallMethod()` 内的 `self` 确保 channel 不会在提交中析构。
+目的：
 
-提交恰好与 stop 竞争时有两类结果：
+- `shutdown()` 使阻塞的 `ReadN()` 或 `WriteN()` 尽快返回；
+- join reader 后不再有 reader 使用 fd；
+- `send_mutex_` 保证 close 不与正在执行的写操作并发。
 
-- 提交在线性化点 `enterCall()` 前后看到 pool 非 `kRunning`：controller 失败为 `RpcChannel is stopped`，done inline 执行。
-- 提交已经进入 pool：它会拿到一个 channel 并继续；随后 channel stop 可能使该请求以 stop、写失败或连接失败完成。
+### 8.4 内存序
 
-### 8.2 Response vs Timeout
+当前主要使用方式：
 
-```text
-reader 线程                             timeout worker
------------                             --------------
-pending_.take(request_id)               pending_.take(request_id)
-  成功 -> response 路径完成               成功 -> timeout 路径完成
-  失败 -> 已由其他路径完成                 失败 -> 已由其他路径完成
-```
+- channel `running_`：release store / acquire load；
+- timeout manager `running_`：release store / acquire load；
+- channel snapshot：release store / acquire load；
+- round-robin `next_`：relaxed。
 
-两条路径共享的线性化点是 `PendingCallManager::take()` 内部 mutex。不会出现两条路径都拿到同一个 `PendingCall`，因此不会因 response / timeout 竞争而重复执行 done。
+需要注意：atomic 只发布状态变化；pending map、timeout heap、thread handle 等复合状态仍由各自 mutex 保护。
 
-### 8.3 Repair vs Stop
+---
 
-repair 读取旧 snapshot 后，在锁外创建 replacement channel；发布前再次读取当前 snapshot：
+## 9. 锁顺序与阻塞操作
 
-```text
-repair 读取 old_snapshot
-stop 将 channels_snapshot_ 置空
-repair 再次读取 now_snapshot
-old_snapshot != now_snapshot
-  -> repair 不发布 replacement，停止自己新建的 channel
-```
-
-反过来，若 repair 先成功发布 replacement，随后 stop 会读取包含 replacement 的当前 snapshot，并停止其中所有 channel。两条路径依赖 snapshot 指针比较来避免 stop 后重新发布旧视图。
-
-限制：`repairDeadChannels()` 不等待 stop 完成，且没有独立的“repair in progress”计数。当前语义依赖 snapshot 比较保证不发布过期结果；应由 `submit_stop_race_stress` 和 TSAN 持续验证。
-
-### 8.4 Reader Failure vs Repair
-
-```text
-reader failure
-  -> markPendingFailed()
-  -> state_ = kStopping
-  -> isAvailable() 变为 false
-  -> repairDeadChannels() 创建 replacement
-  -> 发布新 snapshot 后 stop old channel
-  -> old channel 停止 timeout manager 并进入 kStopped
-```
-
-reader failure 本身不执行完整 `stop()`，因为 reader 不能 join 自己。若既不 repair 也不 pool stop，失败 channel 仍被 pool snapshot 持有，并且其 timeout manager 不会由失败路径直接停止；这是当前实现应记录的生命周期限制。
-
-## 9. CallbackExecutor
-
-`CallbackExecutor` 是单 worker 队列：
-
-- `start()` 创建 worker，并等待其进入循环。
-- `post()` 在 `started_ && !stopping_` 时入队。
-- `stop()` 先设置 `stopping_`，随后 worker 继续处理已入队任务，直到 queue 为空才退出。
-- 在 callback worker 自身调用 `stop()` 会被拒绝，避免 self-join。
-
-pool 的 `stop()` 也拒绝从 callback worker 调用，因为它最终会停止 executor。用户回调若需要停止客户端，应通知外部 owner 线程，而不是直接在 callback 内调用 `pool.stop()`。
-
-## 10. 错误、日志与指标
-
-| 事件 | 调用方可见结果 | 当前日志行为 | 建议指标 |
-|---|---|---|---|
-| timeout | controller 失败：`rpc call timeout` | timeout 本身无必然 WARN | timeout 数 |
-| 迟到响应 | 已完成的 call 不再改变 | DEBUG：忽略迟到或已完成 response | late response 数 |
-| 写失败 | 所有当前 pending 失败：`send rpc error` | 依赖 channel 错误日志 | send failure 数 |
-| reader 失败 | 当前 pending 以 reader 错误完成 | 依赖 reader 错误日志 | connection loss 数 |
-| pool 已停止 | controller 失败：`RpcChannel is stopped` | 无专门日志 | rejected submit 数 |
-| 无可用 channel | controller 失败：`no available rpc channel` | 无专门日志 | unavailable submit 数 |
-
-压力测试不要只依赖日志。至少应断言：`submitted == completed`、最终 inflight 为零、`duplicate_done == 0`、成功与失败分类之和等于完成数，以及预期的 timeout / repair / disconnect 计数非零。
-
-## 11. 测试证据
-
-| 风险 | 主要测试 | 当前关键断言 |
-|---|---|---|
-| 长时间异步提交 | `tests/stress/async_sustained_stress.cc` | 提交与完成计数、inflight 上限、无重复 done |
-| 断连和 replacement | `tests/stress/disconnect_repair_stress.cc` | 请求收束、断连和 repair 调用计数 |
-| submit / stop / repair 竞争 | `tests/stress/submit_stop_race_stress.cc` | 多轮 start/stop、无重复 done、drain |
-| timeout、近 timeout、迟到 response | `tests/stress/timeout_stress.cc` | 正常成功、late timeout、服务端完成全部 response、无重复 done |
-| timeout manager 基础行为 | `tests/unit/rpc_timeout_manager_test.cc` | start/stop、heap 清理、到期回调、并发 start/stop |
-| channel / pool 集成路径 | `tests/integration/rpc_channel_timeout_test.cc`、`tests/integration/rpc_channel_pool_test.cc` | 端到端 timeout、连接池和 stop 行为 |
-
-推荐验证顺序：
-
-```bash
-# 单个变更后的最小目标
-cmake --build build-debug --target <target> -j
-ctest --test-dir build-debug -R '^<test_name>$' --output-on-failure
-
-# 并发生命周期改动完成后
-ctest --test-dir build-debug --output-on-failure
-ctest --test-dir build-asan --output-on-failure
-ctest --test-dir build-tsan --output-on-failure
-```
-
-## 12. 当前限制与后续改进
-
-1. `RpcTimeoutManager` 头文件注释与实际注册 timeout 的顺序不一致。应统一 timeout 是否覆盖等待 send mutex 和阻塞写的正式契约。
-2. 普通异步 callback API 不拥有调用方传入的 request、response 和 controller；API 文档需要明确生命周期要求，或改为内部持有状态。
-3. reader failure 后 channel 进入 `kStopping`，但 timeout manager 的停止依赖后续 repair 或 pool stop；可考虑把失败收束定义得更完整，或明确这是有意的延迟清理。
-4. `repairDeadChannels()` 与 `stop()` 的正确性主要依赖 snapshot 比较；应补充带屏障的确定性竞态测试，而不只依赖时间驱动 stress。
-5. 迟到响应、重复响应和从未注册的 request id 当前都可能落入“pending 不存在”的分支；如需更强可观测性，应在 pending manager 中保留有界终态记录，区分 timeout、断连、正常完成和未知 id。
-6. 默认 CTest 的 duration 与 CTest timeout 必须匹配。对于按时间运行的 stress，满足 `CTest TIMEOUT > duration + drain + cleanup`；对于大 `max_requests`，应单独估算 `max_inflight / timeout` 给出的最低运行时间。
-
-## 13. 并发修改检查清单
-
-- [ ] 明确新对象的 owner、引用类型和销毁线程。
-- [ ] 明确每个新线程的退出条件、join 或 detach 规则。
-- [ ] 为每个共享字段指定 mutex、atomic 或单线程所有权。
-- [ ] 写出锁顺序，并检查没有反向获取路径。
-- [ ] 不在持有内部 mutex 时执行用户 callback、阻塞 I/O 或 join。
-- [ ] 每个终止路径都通过 `take` 或等价机制保证 done 恰好一次。
-- [ ] 明确 timeout 从何时开始，并同步代码、注释和测试。
-- [ ] 为新竞态至少添加一个确定性测试或压力测试。
-- [ ] 运行最小 Debug 测试；涉及生命周期或跨线程访问时运行 ASAN 和 TSAN。
-
-
-## 14. 代码级调用时序
-
-本节按当前函数调用顺序展开。排查并发问题时，先确定请求处于哪条时序，再检查它与另一线程时序的交叉点。
-
-### 14.1 正常异步调用
-
-```text
-用户线程
-  RpcChannelPool::CallMethod()
-    enterCall()
-      lifecycle_mutex_：确认 pool_state_ == kRunning
-      active_calls_++
-    pickChannel()
-      acquire load channels_snapshot_
-      next_.fetch_add(relaxed)
-      channel->isAvailable()
-        channel lifecycle_mutex_：确认 state_ == kRunning
-    MyRpcChannel::CallMethod()
-      shared_from_this()：固定 channel 生命周期
-      生成 request_id，编码请求帧
-      pending_.add(request_id, call)
-      timeout_manager_.add(request_id, deadline)
-      send_mutex_：WriteN(request frame)
-    leaveCall()
-      lifecycle_mutex_：active_calls_--，通知 stop 等待者
-
-reader 线程
-  读取并解析 response frame
-  pending_.take(request_id)
-  解码 response body
-  finishCall(call)
-    call->finished = true
-    唤醒同步调用等待者
-    CallbackExecutor::post(done)
-
-callback worker
-  done->Run()
-```
-
-这里有两个不同的完成概念：
-
-- `leaveCall()` 仅表示 pool 的提交函数已返回；它不表示异步 RPC 已完成。
-- `finishCall()` 才表示本次 RPC 已有最终结果，response、controller 和 done 可以被观察。
-
-因此 `active_calls_ == 0` 不能解释为“没有异步 RPC 正在运行”。它只说明没有线程停留在 pool 的提交函数中。
-
-### 14.2 Timeout、迟到 response 与断连
-
-```text
-用户线程
-  pending_.add(id, call)
-  timeout_manager_.add(id, deadline)
-  继续等待 send mutex 或 WriteN
-
-timeout worker
-  deadline 到期
-  -> MyRpcChannel::onRpcTimeout(id)
-  -> pending_.take(id)
-       成功：timeout 获得完成权
-       失败：response、stop 或断连已先完成 call
-
-稍后 reader 收到相同 id 的 response
-  -> pending_.take(id) 返回 nullptr
-  -> DEBUG 忽略，不修改 controller，不重复执行 done
-```
-
-`RpcTimeoutManager` 不持有 `PendingCall`，只保存 `request_id + deadline`。真正决定完成权的始终是 `PendingCallManager::take(id)`。
-
-```text
-写失败：
-  WriteN 返回 false
-  -> markPendingFailed("send rpc error")
-  -> state_ = kStopping
-  -> running_ = false
-  -> shutdown socket
-  -> pending_.failAllAndStopAccepting()
-  -> 锁外逐个 finishCallWithError()
-
-reader failure：
-  ReadN / decode 失败
-  -> failFromReaderThread(reason)
-  -> markPendingFailed(reason)
-  -> detach 当前 reader thread handle
-  -> 锁外逐个 finishCallWithError()
-```
-
-`markPendingFailed()` 是 reader failure 到 repair 的桥梁：它把 `state_` 从 `kRunning` 改为 `kStopping`，所以 repair 通过 `isAvailable()` 可以识别不可用 channel。它不直接 stop timeout manager；这项最终清理由后续 repair 或 pool stop 完成。
-
-### 14.3 Pool stop
-
-```text
-pool owner 线程
-  RpcChannelPool::stop()
-    检查当前线程不是 callback worker
-    lifecycle_mutex_：pool_state_ = kStopping
-    repair_mutex_：清空 channels_snapshot_，保留 old_snapshot
-
-    对 old_snapshot 的每个 channel：
-      channel->stop()
-        shared_from_this()：防止 stop 内 callback 释放最后一个外部引用
-        markPendingFailed("stop() is called")
-        cleanupStoppedConnection()
-          join reader
-          send_mutex_：close socket
-        timeout_manager_.stop()
-        state_ = kStopped
-        锁外完成旧 pending call
-
-    lifecycle_mutex_：等待 active_calls_ == 0
-    callback_executor_->stop()：drain 已入队 callback
-    lifecycle_mutex_：pool_state_ = kStopped
-```
-
-stop 期间，新进入 `CallMethod()` 的调用会被 `enterCall()` 拒绝，并在当前线程 inline 执行错误 done。已经通过 `enterCall()` 的调用仍可能到达旧 channel；其结果由 channel 的 stop、写失败或正常 response 路径决定。
-
-## 15. 锁与等待审计
-
-### 15.1 已确认的嵌套顺序
+### 9.1 已确认的嵌套顺序
 
 ```text
 RpcChannelPool::start() / stop()
   lifecycle_mutex_
     -> repair_mutex_
 
-RpcChannelPool::repairChannel()
+RpcChannelPool::repairDeadChannels()
   repair_mutex_
     -> MyRpcChannel::lifecycle_mutex_（经 isAvailable()）
 
 RpcTimeoutManager::start() / stop()
   lifecycle_mutex_
-    -> mutex_（heap 与 worker 状态）
+    -> heap mutex
 ```
 
-`pending_.add/take`、`timeout_manager_.add`、`send_mutex_` 通常只在各自短临界区中使用，不跨函数保持。这个设计减少锁顺序复杂度，但要求状态机和 pending 完成权非常明确。
+`pending_.add/take`、`timeout_manager_.add` 和 `send_mutex_` 通常在独立短临界区中使用，不跨较大调用链持有。
 
-### 15.2 不应在持锁状态执行的操作
+### 9.2 禁止在内部锁内执行的操作
 
-| 操作 | 当前做法 | 原因 |
+| 操作 | 约束 | 原因 |
 |---|---|---|
-| 执行用户 done | 在 `take` / `failAll` 返回后执行 | 用户 callback 可以重入 RPC 或持有任意用户锁 |
-| 网络 connect / start | repair 在 `repair_mutex_` 外执行 | connect 可能阻塞，不能阻塞 snapshot 读取和 stop |
-| stop 旧 channel | replacement 发布后、repair mutex 外执行 | channel stop 可能 join reader 并 drain callback |
-| join reader | `reader_mutex_` 外真正 join | 避免持有 reader 元数据锁等待 reader 结束 |
-| close socket | reader 退出后、`send_mutex_` 下执行 | 避免 close 与 write/read 并发造成 fd 问题 |
+| 用户 `done` | 必须在内部锁外执行 | callback 可重入框架并获取任意用户锁 |
+| 网络 connect | 不持有 `repair_mutex_` | connect 可能阻塞 |
+| channel start | 不持有 `repair_mutex_` | 可能创建线程和访问网络 |
+| channel stop | 不持有 `repair_mutex_` | 可能 shutdown、join、drain callback |
+| reader join | 不持有 `reader_mutex_` 等待 | 避免持元数据锁等待线程退出 |
+| socket I/O | 不持有生命周期锁长期阻塞 | 避免阻塞状态转换 |
+| executor stop/join | 不从 executor worker 调用 | 避免 self-join |
 
-### 15.3 callback 中调用 stop 的问题
+---
+
+## 10. 关键并发交错
+
+### 10.1 Submit vs Stop
 
 ```text
-用户 callback -> pool.stop()
-pool.stop() -> callback_executor.stop() -> join callback worker
-callback worker 正在执行用户 callback
+提交线程                              stop 线程
+--------                              ---------
+enterCall():
+  pool_state_ == kRunning
+  active_calls_++
+
+                                    pool_state_ = kStopping
+                                    摘除 channels_snapshot_
+
+pickChannel():
+  持有局部 snapshot/channel shared_ptr
+
+channel->CallMethod()                stop old_snapshot channels
+
+leaveCall():
+  active_calls_--
+
+                                    等待 active_calls_ == 0
+                                    stop callback executor
 ```
 
-这会形成 worker 等待自己退出的环。因此 `RpcChannelPool::stop()` 和 `CallbackExecutor::stop()` 都拒绝从 callback worker 调用。用户 callback 若需停止客户端，应通知外部 owner 线程。
+可能结果：
 
-## 16. 调用方使用契约
+1. 提交在 `enterCall()` 处观察到 pool 已非 `kRunning`：
+   - 请求不进入 channel；
+   - controller 设置为 `RpcChannel is stopped`；
+   - `done` 在当前线程 inline 执行。
 
-### 16.1 同步调用
+2. 提交已经通过 `enterCall()`：
+   - 允许继续使用局部 channel `shared_ptr`；
+   - channel stop 可能与提交竞争；
+   - 请求最终可能正常完成，也可能以 stop、写失败或连接失败终止；
+   - `leaveCall()` 后 pool 才允许最终停止 executor。
 
-同步调用传入 `done == nullptr`。`MyRpcChannel::CallMethod()` 在提交后等待 `call->finished`，因此当前调用栈中的 request、response、controller 会一直存活到终止路径完成。
+`active_calls_` 不阻止 channel stop 与提交过程并发；它保证的是在提交函数完全退出前，pool 不销毁 callback executor。
+
+### 10.2 Response vs Timeout
+
+```text
+reader thread                         timeout worker
+-------------                         --------------
+pending_.take(request_id)             pending_.take(request_id)
+```
+
+两条路径共享 `PendingCallManager` 内部 mutex。只有一条路径能够移除目标 call。
+
+胜出的路径必须：
+
+1. 先取得 `PendingCall`；
+2. 再写 response 或 controller；
+3. 再调用 `finishCall()`。
+
+失败路径得到 `nullptr` 后不得修改用户对象。
+
+### 10.3 Repair vs Stop
+
+repair 使用“复制旧 snapshot、锁外构建、重新比较、条件发布”的模式：
+
+```text
+repair:
+  old_snapshot = load current snapshot
+  在锁外创建 replacement
+
+stop:
+  将 current snapshot 置空
+
+repair publish phase:
+  now_snapshot = load current snapshot
+  if now_snapshot != old_snapshot:
+      不发布 replacement
+      在锁外 stop replacement
+```
+
+两种有效结果：
+
+- repair 先发布：后续 stop 取得包含 replacement 的 snapshot，并停止所有 channel；
+- stop 先摘除：repair 的 snapshot 比较失败，不允许重新发布旧视图，replacement 自行 stop。
+
+当前正确性依赖 snapshot 身份比较和发布前复核。
+
+当前限制：
+
+- 没有独立的 `repair_in_progress` 计数；
+- `stop()` 不等待所有 repair 调用返回；
+### 10.4 Reader Failure vs Repair
+
+```text
+reader failure
+  -> markPendingFailed()
+  -> state_ = kStopping
+  -> detachReaderHandleIfCurrentThread()
+  -> isAvailable() == false
+  -> repair 创建 replacement
+  -> 条件发布新 snapshot
+  -> 在锁外 stop old channel
+  -> old timeout manager 最终停止
+```
+
+reader failure 不能在 reader 线程执行完整 stop，因此失败 channel 的最终清理依赖 repair 或 pool stop。
+
+如果应用既不调用 repair，也不调用 pool stop：
+
+- 失败 channel 仍可能被 snapshot 持有；
+- timeout manager 不一定立即停止；
+- channel 保持不可用但尚未完全清理的状态。
+
+这是当前实现的已知生命周期限制。
+
+### 10.5 Callback vs Stop
+
+以下调用链会形成 self-join：
+
+```text
+callback worker
+  -> 用户 done
+  -> pool.stop()
+  -> callback_executor.stop()
+  -> join callback worker
+```
+
+因此：
+
+- `CallbackExecutor::stop()` 拒绝从自身 worker 调用；
+- `RpcChannelPool::stop()` 也拒绝从 callback worker 调用；
+- 用户回调需要停止客户端时，应通知外部 owner 线程执行 stop。
+
+---
+
+## 11. CallbackExecutor 语义
+
+`CallbackExecutor` 是单 worker 任务队列。
+
+### `start()`
+
+- 创建 worker；
+- 等待 worker 进入运行循环；
+- 此后 `post()` 才可成功接受任务。
+
+### `post()`
+
+仅在以下条件成立时入队：
+
+```text
+started_ == true
+stopping_ == false
+```
+
+成功入队后，任务由 worker 顺序执行。
+
+### `stop()`
+
+- 设置 `stopping_`；
+- 拒绝新的 `post()`；
+- worker 继续执行已经入队的任务；
+- queue 为空后退出；
+- 非 worker 线程 join worker。
+
+因此 pool 必须先使所有 channel 不再产生新的完成事件，再停止 executor。
+
+需要区分：
+
+- **已成功入队的回调**：stop 时会被 drain；
+- **stop 后尝试 post 的回调**：post 失败，由 `runDone()` 在当前线程 inline 执行。
+
+---
+
+## 12. 调用方使用契约
+
+### 12.1 同步调用
+
+同步调用传入 `done == nullptr`：
 
 ```cpp
 stub.Login(&controller, &request, &response, nullptr);
+
 if (controller.Failed()) {
-    // timeout、连接丢失、stop、编码或写失败
+    // timeout、断连、stop、编码失败或写失败
+    return;
 }
+
+// 只有 controller 成功时才读取业务 response
 ```
 
-同步调用醒来后不保证业务 response 有效；必须先检查 `controller.Failed()`。
+`CallMethod()` 会等待 `call->finished`，因此调用栈中的 request、response 和 controller 在函数返回前保持有效。
 
-### 16.2 普通异步 callback 调用
+同步调用返回后必须先检查 `controller.Failed()`，失败路径不保证业务 response 有效。
 
-普通异步调用不会复制调用者传入的 request、response、controller。它们必须存活到 done 返回：
+### 12.2 普通异步 callback
+
+调用者必须让 request、response 和 controller 存活到 `done` 返回：
 
 ```cpp
 auto state = std::make_shared<CallState>();
-// state 内保存 request、response、controller
-auto done = SendResponseClosure([state] {
-    // state 仍存活
+
+auto done = NewClosure([state] {
+    if (state->controller.Failed()) {
+        // 处理失败
+        return;
+    }
+
+    // 使用 state->response
 });
-stub.Login(&state->controller, &state->request, &state->response, done);
+
+stub.Login(
+    &state->controller,
+    &state->request,
+    &state->response,
+    done);
 ```
 
-将栈上的 request、response、controller 传给异步调用后立即离开作用域是不安全的；channel 只保存裸指针，后续 reader 或 timeout 会访问它们。
+不安全示例：
 
-### 16.3 Future 调用
+```cpp
+void submit()
+{
+    Request request;
+    Response response;
+    Controller controller;
 
-future API 使用 `FutureCallState` 内部拥有 request、response、controller、promise 和 closure。调用者提交后可以释放外部 request；但销毁 future 本身不会取消 RPC，内部 state 仍由 pending call / closure 保持到终止。
+    stub.Login(&controller, &request, &response, done);
+} // 函数返回后对象已经销毁，但异步请求可能仍在运行
+```
 
-### 16.4 Start / stop 使用规则
+### 12.3 Future API
+
+Future API 通过 `FutureCallState` 持有：
+
+- request；
+- response；
+- controller；
+- promise；
+- done closure。
+
+提交后，外部 request 不需要继续存活。
+
+销毁 future 不等价于取消 RPC。请求仍由内部 state、pending call 和 closure 保持到某个终止路径完成。
+
+### 12.4 Start / Stop 规则
+
+调用方应遵守：
+
+1. 确认 `start()` 成功后再提交 RPC。
+2. 调用 `stop()` 前停止创建新的外部提交任务。
+3. 不从 callback worker 直接调用 `pool.stop()`。
+4. `stop()` 返回后可以重新 `start()`，但不得继续使用旧 channel 的直接引用。
+5. pool 析构前同样满足第 2、3 条。
+6. 不将 pool 析构与其成员函数调用并发执行。
+
+---
+
+## 13. 错误语义与可观测性
+
+| 事件                    | 调用方可见结果                          | 当前日志行为            | 建议指标                     |
+| --------------------- | -------------------------------- | ----------------- | ------------------------ |
+| timeout               | controller：`rpc call timeout`    | 不记录               | timeout count            |
+| 已完成/未知 response     | 不再修改已完成 call                     | DEBUG：pending 不存在 | completed-or-unknown response count |
+| 写失败                   | 当前 pending 批量失败：`send rpc error` | channel 错误日志      | send failure count       |
+| reader 失败             | 当前 pending 按 reader 错误失败         | reader/channel 日志 | connection loss count    |
+| pool 已停止              | `RpcChannel is stopped`          | 通常无专门日志           | rejected submit count    |
+| 无可用 channel           | `no available rpc channel`       | 通常无专门日志           | unavailable submit count |
+| repair 尝试             | 尝试替换不可用 channel                  | 可选 INFO           | repair attempt count     |
+| repair 丢弃 replacement | replacement 被 stop               | 可选 DEBUG          | stale repair count       |
+
+压力测试不应只依赖日志判断正确性。至少断言：
 
 ```text
-1. 先确认 start() 成功，再发起 RPC。
-2. stop() 前停止新的外部提交线程。
-3. 不从 callback worker 直接调用 pool.stop()。
-4. stop() 返回后可再次 start()；调用方不应保留旧 channel 的直接引用。
-5. pool 析构前也应满足第 2、3 条。
+submitted == completed
+final_inflight == 0
+duplicate_done == 0
+success + failed == completed
+max_observed_inflight <= configured_max_inflight
 ```
 
-## 17. Stress 测试结果的解读
+场景型测试还应验证预期事件确实发生，例如：
+
+- timeout 数非零；
+- disconnect 数非零；
+- repair 尝试数非零，并且后续请求能够恢复完成；
+- 已完成/未知 response 数非零；
+- stop 拒绝提交数非零。
+
+---
+
+## 14. 测试证据与 CI 分类
+
+| 风险                     | 主要测试                                                                       | 关键断言                      | 标签            |
+| ---------------------- | -------------------------------------------------------------------------- | ------------------------- | ------------- |
+| 长时间异步提交                | `tests/stress/async_sustained_stress.cc`                                   | 完成计数、inflight 上限、无重复 done | `stress`      |
+| 断连与 replacement        | `tests/stress/disconnect_repair_stress.cc`                                 | 请求收束、断连和 repair 计数        | `stress`      |
+| submit / stop / repair | `tests/stress/submit_stop_race_stress.cc`                                  | 多轮启停、drain、无重复 done       | `stress`      |
+| timeout 与迟到响应          | `tests/stress/timeout_stress.cc`                                           | 多类结果出现、服务端完成响应、done once  | `stress`      |
+| timeout manager 基础行为   | `tests/unit/rpc_timeout_manager_test.cc`                                   | start/stop、heap、到期回调、并发行为 | `unit`        |
+| channel / pool 集成      | `tests/integration/rpc_channel_timeout_test.cc`、`rpc_channel_pool_test.cc` | timeout、连接池、stop、repair   | `integration` |
+| pending add 与 stop      | `tests/integration/rpc_channel_race_test.cc`                                | 请求完成一次、pending 收束      | `race`        |
+| response 与 timeout      | `tests/integration/rpc_channel_race_test.cc`                                | timeout 结果不被 response 覆盖、done once | `race` |
+| repair 发布与 stop        | `tests/integration/rpc_channel_pool_race_test.cc`                           | stop 后不发布 replacement、replacement 已停止 | `race` |
+
+推荐验证顺序：
+
+```bash
+# 普通快速回归
+cmake -S . -B build-debug \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DMYRPC_BUILD_TESTS=ON
+
+cmake --build build-debug -j
+ctest --test-dir build-debug --output-on-failure
+
+# 常规功能测试
+cmake -S . -B build-debug \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DMYRPC_BUILD_TESTS=ON
+
+cmake --build build-debug -j
+ctest --test-dir build-debug -N -L unit --output-on-failure
+ctest --test-dir build-debug -N -L integration --output-on-failure
+
+# ASAN：确定性竞态测试
+cmake -S . -B build-asan \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DMYRPC_BUILD_RACE_TESTS=ON \
+  -DMYRPC_ENABLE_TEST_HOOKS=ON \
+  -DMYRPC_ENABLE_ASAN=ON
+cmake --build build-asan -j
+ctest --test-dir build-asan \
+  -L race \
+  --output-on-failure \
+  --parallel 1
+
+# TSAN：确定性竞态测试
+cmake -S . -B build-tsan \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DMYRPC_BUILD_RACE_TESTS=ON \
+  -DMYRPC_ENABLE_TEST_HOOKS=ON \
+  -DMYRPC_ENABLE_TSAN=ON
+cmake --build build-tsan -j
+ctest --test-dir build-tsan \
+  -L race \
+  --output-on-failure \
+  --parallel 1
+
+# 压力测试：各测试的 CTest 参数与 timeout 见 `tests/stress/CMakeLists.txt`；长时间测试默认可运行 300 秒。
+cmake -S . -B build-stress \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DMYRPC_BUILD_STRESS_TESTS=ON
+cmake --build build-stress -j
+ctest --test-dir build-stress \
+  -L stress \
+  --output-on-failure \
+  --parallel 1
+```
+
+---
+
+## 15. Stress 结果解释
 
 | 现象 | 严重性 | 含义 |
 |---|---|---|
-| `duplicate_done > 0` | 最高 | 两条终止路径都运行 callback，唯一完成权被破坏 |
-| `submitted != completed` | 最高 | 请求丢失或 callback 悬挂 |
-| `final_inflight != 0` | 高 | pending 请求未收束 |
-| `success + failed != completed` | 高 | 测试分类或完成路径计数错误 |
-| `max_observed_inflight > max_inflight` | 高 | 提交限流失效 |
-| timeout 数量高 | 结合场景判断 | 可能是预期延迟、队头阻塞或性能问题 |
-| late response 日志 | 通常可接受 | 先 timeout / stop 后收到 response；应结合计数判断 |
+| `duplicate_done > 0` | 致命 | 唯一完成权被破坏 |
+| `submitted != completed` | 致命 | 请求丢失、callback 悬挂或测试未收束 |
+| `final_inflight != 0` | 高 | pending 或测试状态未完全清理 |
+| `success + failed != completed` | 高 | 完成分类不完整或存在重复统计 |
+| `max_observed_inflight > max_inflight` | 高 | 客户端限流失效 |
+| timeout 数较高 | 结合场景 | 可能是预期延迟、队头阻塞或性能不足 |
+| late response 日志 | 通常可接受 | timeout、stop 或断连先取得完成权 |
 
-`timeout_stress` 的服务端在每条 TCP 连接上串行运行：
+### 15.1 `timeout_stress` 的队头阻塞
 
-```text
-读取请求 -> buildLoginResponseBody() -> 写响应 -> 读取下一个请求
-```
-
-所以 late 请求会阻塞同连接后面的 fast / near-timeout 请求。不能按服务端 80% fast/near 的类别比例断言客户端 80% 成功；正确断言是三类结果都出现、请求恰好完成一次、服务端最终构造全部 response。
-
-扩大 `max_requests` 前应估算：
+测试服务端在每条 TCP 连接上通常串行执行：
 
 ```text
-理论下界约为 max_requests / (max_inflight / timeout_seconds)。
+read request
+  -> build response
+  -> write response
+  -> read next request
 ```
 
-例如 `max_inflight=16`、`timeout=40ms` 时，大量 timeout 请求的上界吞吐约为 `400 req/s`；`300000` 请求仅由 timeout 释放 inflight 就至少需要约 750 秒。CTest 的 `TIMEOUT` 必须覆盖测试时长、drain 和服务端清理时间。
+因此一个 deliberately-late 请求会阻塞同一连接后面的 fast 或 near-timeout 请求。
 
-## 18. 下一步：确定性竞态测试
+不能简单按服务端生成的请求类别比例推导客户端成功比例。正确断言应关注：
 
-时间驱动 stress 覆盖广，但不保证命中特定交错。应增加 barrier / hook，精确覆盖：
+- 请求全部终止；
+- 每个请求恰好完成一次；
+- success、timeout 等预期类别均出现；
+- 服务端最终构造全部 response；
+- 迟到 response 不会修改已终止请求。
 
-1. `pending_.add()` 成功、`timeout_manager_.add()` 尚未执行时调用 stop。
-2. reader 已解析 response header、尚未 `pending_.take()` 时触发 timeout。
-3. repair 已读取旧 snapshot、尚未发布 replacement 时调用 stop。
-4. callback 已投递、尚未执行时开始 channel / pool 析构。
+### 15.2 测试规模与 CTest 超时
 
-每个测试都应断言：无死锁、无 use-after-free、done 恰好一次、所有 pending 最终清空、对象只在非 reader 线程析构。
+大量 timeout 请求时，可用以下近似估算测试耗时下界：
+
+```text
+throughput upper bound ≈ max_inflight / timeout_seconds
+
+minimum duration ≈ max_requests / throughput upper bound
+```
+
+例如：
+
+```text
+max_inflight = 16
+timeout = 40 ms = 0.04 s
+
+throughput upper bound ≈ 16 / 0.04 = 400 requests/s
+```
+
+若 `max_requests = 300000`，仅依赖 timeout 释放 inflight 的理论下界约为 750 秒，尚未计算 drain 和服务端清理。
+
+因此应满足：
+
+```text
+CTest TIMEOUT > test duration + drain time + cleanup margin
+```
+
+短 CI stress 与 300 秒长 stress 应通过环境变量或命令行参数复用同一测试逻辑。
+
+---
+
+## 16. 代码级时序
+
+### 16.1 正常异步调用
+
+```text
+调用方线程
+  RpcChannelPool::CallMethod()
+    enterCall()
+      lifecycle_mutex_:
+        require pool_state_ == kRunning
+        active_calls_++
+
+    pickChannel()
+      acquire-load channels_snapshot_
+      next_.fetch_add(relaxed)
+      channel->isAvailable()
+
+    MyRpcChannel::CallMethod()
+      shared_from_this()
+      allocate request_id
+      encode request frame
+      pending_.add(id, call)
+      timeout_manager_.add(id, deadline)
+      send_mutex_:
+        WriteN(frame)
+
+    leaveCall()
+      lifecycle_mutex_:
+        active_calls_--
+        notify stop waiter
+
+reader thread
+  read and decode response frame
+  call = pending_.take(id)
+  if call == nullptr:
+      当前统一忽略已完成、重复或未知 response
+  else:
+      parse response into call->response
+      update controller if needed
+      finishCall(call)
+
+callback worker
+  done->Run()
+```
+
+需要区分两个完成概念：
+
+- `leaveCall()`：提交函数退出；
+- `finishCall()`：RPC 获得最终结果。
+
+因此：
+
+```text
+active_calls_ == 0
+```
+
+只表示没有线程停留在 pool 提交函数中，不表示 pending 表为空，也不表示所有 callback 已执行。
+
+### 16.2 Timeout 与已完成 response
+
+```text
+调用方线程
+  pending_.add(id, call)
+  timeout_manager_.add(id, deadline)
+  wait send_mutex_ / WriteN
+
+timeout worker
+  deadline reached
+  -> onRpcTimeout(id)
+  -> call = pending_.take(id)
+       success: timeout owns completion
+       nullptr: another path already completed call
+  -> set controller timeout error
+  -> finishCall(call)
+
+reader later receives response
+  -> pending_.take(id) == nullptr
+  -> ignore without touching response/controller
+```
+
+### 16.3 写失败或 reader failure
+
+```text
+WriteN failure
+  -> markPendingFailed("send rpc error")
+     state_ = kStopping
+     running_ = false
+     shutdown(socket)
+     calls = pending_.failAllAndStopAccepting()
+  -> for each call:
+       finishCallWithError(call)
+
+reader failure
+  -> failFromReaderThread(reason)
+     -> markPendingFailed(reason)
+     -> release/detach current reader handle as implemented
+  -> finish all removed calls outside locks
+```
+
+### 16.4 Pool stop
+
+```text
+pool owner thread
+  RpcChannelPool::stop()
+    reject callback-worker invocation
+
+    lifecycle_mutex_:
+      pool_state_ = kStopping
+
+    repair_mutex_:
+      old_snapshot = channels_snapshot_
+      channels_snapshot_ = empty
+
+    for channel in old_snapshot:
+      channel->stop()
+        shared_from_this()
+        markPendingFailed("stop() is called")
+        cleanupStoppedConnection()
+          running_ = false
+          shutdown(socket)
+          join reader
+          send_mutex_:
+            close(socket)
+        timeout_manager_.stop()
+        state_ = kStopped
+        finish removed pending calls outside locks
+
+    lifecycle_mutex_:
+      wait active_calls_ == 0
+
+    callback_executor_->stop()
+      drain queued callbacks
+      join worker
+
+    lifecycle_mutex_:
+      pool_state_ = kStopped
+```
+
+---
+
+## 17. 已知限制与后续改进
+
+1. **Timeout 注释与代码统一**  
+   确认正式契约为“timeout 覆盖等待 send mutex 与 socket 写入”，同步修改头文件、README 和测试名称。
+
+2. **普通异步 API 的对象所有权**  
+   当前只保存外部裸指针。应在公共 API 文档中明确生命周期要求；若未来改进，可引入框架持有的调用状态。
+
+3. **Reader failure 的完整清理**  
+   reader failure 后 timeout manager 的停止依赖 repair 或 pool stop。
+
+4. **Repair 与 stop 的完成屏障**  
+   当前依赖 snapshot 比较阻止 stale publication，但 stop 不等待 repair 调用退出。若需要更强契约，可增加 repair 活跃计数或 generation token。
+
+5. **Pending 不存在的可观测性**  
+   迟到 response、重复 response 和未知 request id 当前共享同一日志分支；因此只能按“已完成/未知 response”计数。若需要精确诊断，可保留有界终态记录：已超时或断连清理的 request id 记 DEBUG 并计数，从未注册或重复的 request id 记 WARN。
+
+6. **Lazy timeout item**  
+   正常完成后 timeout heap 中的条目在 deadline 前不会删除。应通过容量测试确认高 QPS、长 timeout 场景下的内存上界。
+
+7. **异步取消语义**  
+   当前 Future 和 callback API 均不支持显式取消。销毁 future 或 closure 不会取消已经提交的请求。
+
+8. **析构并发契约**  
+   pool 和 channel 的析构不支持与外部成员函数调用并发。
+
+---
+
+## 18. 确定性竞态测试
+
+### 18.1 Pending add vs Stop
+
+交错：
+
+```text
+CallMethod:
+  pending_.add() 完成
+  timeout_manager_.add() 尚未执行
+  ---- hook pause ----
+
+stop:
+  markPendingFailed()
+  failAllAndStopAccepting()
+
+resume CallMethod
+```
+
+断言：
+
+- 请求最终完成一次；
+- timeout 注册失败路径不能再次修改 controller；
+- pending 最终为空；
+- 无 use-after-free。
+
+### 18.2 Response ownership vs Timeout
+
+交错：
+
+```text
+reader:
+  response frame 已解析
+  pending_.take() 尚未执行
+  ---- hook pause ----
+
+timeout:
+  pending_.take() 成功并完成 call
+
+resume reader
+```
+
+断言：
+
+- reader 的 `take()` 返回空；
+- reader 不解析到用户 response；
+- controller 保持 timeout 结果；
+- `done` 只执行一次。
+
+### 18.3 Repair publication vs Stop
+
+交错：
+
+```text
+repair:
+  创建 replacement 完成
+  发布 snapshot 前暂停
+
+stop:
+  摘除 snapshot
+  stop old channels
+  返回或进入最终收束
+
+resume repair
+```
+
+断言：
+
+- replacement 不得在 stop 后发布；
+- replacement 必须自行 stop；
+- stop 返回后 snapshot 为空；
+- 所有 channel 均不可用且已停止。
+
+
+---
+
+## 19. 并发修改检查清单
+
+### 所有权与生命周期
+
+- [ ] 明确新对象的 owner。
+- [ ] 明确使用裸指针、`unique_ptr`、`shared_ptr` 或 `weak_ptr` 的原因。
+- [ ] 明确对象可能在哪些线程释放最后一个引用。
+- [ ] 析构是否可能发生在 reader、timeout 或 callback worker。
+- [ ] 外部调用方需要维持哪些对象的生命周期。
+
+### 线程
+
+- [ ] 明确线程创建者。
+- [ ] 明确退出条件。
+- [ ] 明确 join、detach 或自持有规则。
+- [ ] 检查 self-join。
+- [ ] 检查线程退出后是否仍可能访问 owner。
+
+### 共享状态
+
+- [ ] 每个共享字段由 mutex、atomic 或单线程所有权保护。
+- [ ] atomic 的内存序与发布语义明确。
+- [ ] 复合状态不依赖多个无关联 atomic 拼接。
+- [ ] snapshot 发布后保持不可变。
+
+### 锁与阻塞
+
+- [ ] 写出锁顺序。
+- [ ] 检查不存在反向获取路径。
+- [ ] 不在持锁状态执行用户 callback。
+- [ ] 不在持有全局生命周期锁时进行网络阻塞。
+- [ ] 不在持有元数据锁时 join。
+- [ ] close 与 ReadN/WriteN 的并发关系明确。
+
+### 请求完成
+
+- [ ] 每条终止路径先取得完成权，再修改 response/controller。
+- [ ] `done` 恰好执行一次。
+- [ ] 同步 waiter 恰好被唤醒并能观察终态。
+- [ ] 迟到 response 不修改已经完成的调用。
+- [ ] timeout、stop、disconnect 和 response 的竞争均有测试。
+
+### 验证
+
+- [ ] Debug 常规测试通过。
+- [ ] ASAN 核心测试通过。
+- [ ] TSAN 并发测试通过。
+- [ ] 短 stress 在 CI 中运行。
+- [ ] 关键交错有 hook/barrier 确定性测试。
+- [ ] 长 stress 的 duration 与 CTest timeout 匹配。
