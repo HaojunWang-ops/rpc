@@ -8,3 +8,4 @@ build-tsan
 test.sh
 build-release
 build-benchmark
+build-ci-race-check

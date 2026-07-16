@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  debug:
+    name: Debug unit and integration
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ libprotobuf-dev protobuf-compiler libgtest-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-debug -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DMYRPC_BUILD_EXAMPLES=OFF \
+            -DMYRPC_BUILD_TESTS=ON \
+            -DMYRPC_BUILD_RACE_TESTS=OFF \
+            -DMYRPC_BUILD_STRESS_TESTS=OFF \
+            -DMYRPC_BUILD_BENCHMARKS=OFF
+
+      - name: Build
+        run: cmake --build build-debug --parallel
+
+      - name: Run unit tests
+        run: ctest --test-dir build-debug -L unit --output-on-failure
+
+      - name: Run integration tests
+        run: ctest --test-dir build-debug -L integration --output-on-failure
+
+  asan-race:
+    name: ASAN deterministic races
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ libprotobuf-dev protobuf-compiler libgtest-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DMYRPC_BUILD_EXAMPLES=OFF \
+            -DMYRPC_BUILD_TESTS=OFF \
+            -DMYRPC_BUILD_RACE_TESTS=ON \
+            -DMYRPC_BUILD_STRESS_TESTS=OFF \
+            -DMYRPC_BUILD_BENCHMARKS=OFF \
+            -DMYRPC_ENABLE_TEST_HOOKS=ON \
+            -DMYRPC_ENABLE_ASAN=ON
+
+      - name: Build
+        run: cmake --build build-asan --parallel
+
+      - name: Run deterministic race tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+        run: ctest --test-dir build-asan -L race --output-on-failure
+
+  tsan-race:
+    name: TSAN deterministic races
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ libprotobuf-dev protobuf-compiler libgtest-dev
+
+      - name: Configure
+        run: |
+          cmake -S . -B build-tsan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DMYRPC_BUILD_EXAMPLES=OFF \
+            -DMYRPC_BUILD_TESTS=OFF \
+            -DMYRPC_BUILD_RACE_TESTS=ON \
+            -DMYRPC_BUILD_STRESS_TESTS=OFF \
+            -DMYRPC_BUILD_BENCHMARKS=OFF \
+            -DMYRPC_ENABLE_TEST_HOOKS=ON \
+            -DMYRPC_ENABLE_TSAN=ON
+
+      - name: Build
+        run: cmake --build build-tsan --parallel
+
+      - name: Run deterministic race tests
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: ctest --test-dir build-tsan -L race --output-on-failure
