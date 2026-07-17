@@ -280,3 +280,7 @@ cmake --build build-benchmark -j
 - [`benchmarks/`](benchmarks/)：客户端 benchmark。
 - [`docs/`](docs/)：并发模型、测试与设计文档。
 - [`third_party/mini_muduo/`](third_party/mini_muduo/)：内置 reactor/network 实现。
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
