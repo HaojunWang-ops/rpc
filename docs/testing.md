@@ -13,7 +13,7 @@ duplicate_done == 0
 success + failed == completed
 ```
 
-其中 `PendingCallManager::take(request_id)` 是 response、timeout、断连和 stop 等终止路径争夺完成权的线性化点。测试应验证：只有拿到完成权的路径可以写 response/controller 并执行 `done`。
+其中 response、timeout 和 timeout 注册失败通过 `PendingCallManager::take(request_id)` 取得单请求完成权；写失败、reader 断连和 stop 通过 `failAllAndStopAccepting()` 批量转移当前 pending call。测试应验证：无论是单个取出还是批量转移，同一个 call 都只会被一个终止路径完成。
 
 时间驱动的压力测试适合扩大调度空间，但不能保证某个交错发生。涉及完成权、对象析构或 snapshot 发布的竞态，应优先补充 hook/barrier 驱动的确定性测试。
 
@@ -63,7 +63,7 @@ ctest --test-dir build-debug -N -L integration
 
 ### 3.2 ASAN：确定性竞态与内存安全
 
-ASAN 用于检测 use-after-free、越界和泄漏。race tests 需要编译测试 hook；仅打开 `MYRPC_BUILD_RACE_TESTS` 不足以启用这些交错点。
+ASAN 用于检测 use-after-free、越界和泄漏。race tests 需要编译测试 hook；仅打开 `MYRPC_BUILD_RACE_TESTS` 不足以启用这些交错点。`MYRPC_ENABLE_TEST_HOOKS` 是当前内部使用的 CMake cache 变量，未通过根 CMake 的 `option()` 声明；传入 `-DMYRPC_ENABLE_TEST_HOOKS=ON` 即可启用。
 
 ```bash
 cmake -S . -B build-asan \

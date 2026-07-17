@@ -1,6 +1,6 @@
 # my_rpc 客户端并发模型与生命周期设计
 
-> 本文档描述当前 `my_rpc` 客户端实现的并发模型、生命周期边界和可验证行为。  
+> 本文档描述当前 `my_rpc` 客户端实现的并发模型、生命周期边界和可验证行为。
 > 覆盖组件包括 `RpcChannelPool`、`MyRpcChannel`、`PendingCallManager`、`RpcTimeoutManager` 与 `CallbackExecutor`。
 >
 > 文中的“保证”仅表示能够由当前实现及测试证据推导出的行为；“限制”表示当前实现未提供更强契约，或仍需要确定性并发测试进一步验证的部分。
@@ -772,6 +772,7 @@ Future API 通过 `FutureCallState` 持有：
 4. `stop()` 返回后可以重新 `start()`，但不得继续使用旧 channel 的直接引用。
 5. pool 析构前同样满足第 2、3 条。
 6. 不将 pool 析构与其成员函数调用并发执行。
+7. `setTimeoutMs()` 仅在 pool 停止时调用，且不得与 `start()`、repair 或提交调用并发；该设置只会影响后续创建的 channel。
 
 ---
 
@@ -939,7 +940,7 @@ throughput upper bound ≈ 16 / 0.04 = 400 requests/s
 CTest TIMEOUT > test duration + drain time + cleanup margin
 ```
 
-短 CI stress 与 300 秒长 stress 应通过环境变量或命令行参数复用同一测试逻辑。
+当前 CI 不运行 stress。若后续增加短 CI stress，应通过命令行参数复用现有测试逻辑，并与 300 秒长 stress 使用不同的 CTest 配置。
 
 ---
 
@@ -1085,28 +1086,28 @@ pool owner thread
 
 ## 17. 已知限制与后续改进
 
-1. **Timeout 注释与代码统一**  
+1. **Timeout 注释与代码统一**
    确认正式契约为“timeout 覆盖等待 send mutex 与 socket 写入”，同步修改头文件、README 和测试名称。
 
-2. **普通异步 API 的对象所有权**  
+2. **普通异步 API 的对象所有权**
    当前只保存外部裸指针。应在公共 API 文档中明确生命周期要求；若未来改进，可引入框架持有的调用状态。
 
-3. **Reader failure 的完整清理**  
+3. **Reader failure 的完整清理**
    reader failure 后 timeout manager 的停止依赖 repair 或 pool stop。
 
-4. **Repair 与 stop 的完成屏障**  
+4. **Repair 与 stop 的完成屏障**
    当前依赖 snapshot 比较阻止 stale publication，但 stop 不等待 repair 调用退出。若需要更强契约，可增加 repair 活跃计数或 generation token。
 
-5. **Pending 不存在的可观测性**  
+5. **Pending 不存在的可观测性**
    迟到 response、重复 response 和未知 request id 当前共享同一日志分支；因此只能按“已完成/未知 response”计数。若需要精确诊断，可保留有界终态记录：已超时或断连清理的 request id 记 DEBUG 并计数，从未注册或重复的 request id 记 WARN。
 
-6. **Lazy timeout item**  
+6. **Lazy timeout item**
    正常完成后 timeout heap 中的条目在 deadline 前不会删除。应通过容量测试确认高 QPS、长 timeout 场景下的内存上界。
 
-7. **异步取消语义**  
+7. **异步取消语义**
    当前 Future 和 callback API 均不支持显式取消。销毁 future 或 closure 不会取消已经提交的请求。
 
-8. **析构并发契约**  
+8. **析构并发契约**
    pool 和 channel 的析构不支持与外部成员函数调用并发。
 
 ---

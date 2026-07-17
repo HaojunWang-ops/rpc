@@ -14,6 +14,7 @@ option(MYRPC_BUILD_RACE_TESTS "Build deterministic race tests" OFF)
 option(MYRPC_BUILD_STRESS_TESTS "Build long-running stress tests" OFF)
 option(MYRPC_BUILD_BENCHMARKS "Build benchmarks" OFF)
 
+option(MYRPC_ENABLE_TEST_HOOKS "Enable deterministic race test hooks" OFF)
 option(MYRPC_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(MYRPC_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 if (MYRPC_ENABLE_ASAN AND MYRPC_ENABLE_TSAN)
