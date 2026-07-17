@@ -176,7 +176,7 @@ timeout manager 不会在正常 response 到达时逐条删除 deadline；对应
 | `MYRPC_BUILD_BENCHMARKS` | `OFF` | 构建 benchmark |
 | `MYRPC_ENABLE_ASAN` | `OFF` | 启用 AddressSanitizer |
 | `MYRPC_ENABLE_TSAN` | `OFF` | 启用 ThreadSanitizer |
-| `MYRPC_ENABLE_TEST_HOOKS` | 未设置 | 内部 CMake cache 变量；设为 `ON` 后为 race tests 编译测试 hook |
+| `MYRPC_ENABLE_TEST_HOOKS` | `OFF` | 为 race tests 编译测试 hook |
 
 ASAN 与 TSAN 互斥。不要在已用另一种 sanitizer 配置过的构建目录上直接切换，使用独立构建目录。
 

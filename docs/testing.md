@@ -63,7 +63,7 @@ ctest --test-dir build-debug -N -L integration
 
 ### 3.2 ASAN：确定性竞态与内存安全
 
-ASAN 用于检测 use-after-free、越界和泄漏。race tests 需要编译测试 hook；仅打开 `MYRPC_BUILD_RACE_TESTS` 不足以启用这些交错点。`MYRPC_ENABLE_TEST_HOOKS` 是当前内部使用的 CMake cache 变量，未通过根 CMake 的 `option()` 声明；传入 `-DMYRPC_ENABLE_TEST_HOOKS=ON` 即可启用。
+ASAN 用于检测 use-after-free、越界和泄漏。race tests 需要编译测试 hook；仅打开 `MYRPC_BUILD_RACE_TESTS` 不足以启用这些交错点。`MYRPC_ENABLE_TEST_HOOKS` 是默认 `OFF` 的正式 CMake option；传入 `-DMYRPC_ENABLE_TEST_HOOKS=ON` 即可启用。
 
 ```bash
 cmake -S . -B build-asan \
@@ -94,6 +94,14 @@ cmake --build build-tsan -j
 TSAN_OPTIONS=halt_on_error=1:second_deadlock_stack=1 \
 ctest --test-dir build-tsan -L race --output-on-failure
 ```
+
+部分 Linux 本地环境会因较高的地址随机化设置，在 TSAN 启动时报告 `unexpected memory mapping`。运行前可由具备管理员权限的用户执行：
+
+```bash
+sudo sysctl -w vm.mmap_rnd_bits=28
+```
+
+该设置修改主机的地址随机化策略，应仅用于本地 TSAN 验证并按团队环境要求恢复。GitHub Actions CI 当前可以正常执行 TSAN race tests。
 
 ASAN 与 TSAN 互斥。不要在同一个构建目录中切换 sanitizer；使用 `build-asan` 和 `build-tsan` 这样的独立目录。
 
